@@ -1,0 +1,43 @@
+time	2026-11-15 22:49:44
+keep	lines	0	pinned	0
+briefword	2d	unlisted
+briefword	3d	unlisted
+briefword	leads fights	unlisted
+checklist	L1	unlisted	-	Look: 2.5D, pixel sprites on a flat plane moving through a lit 3D sea: parallax depth layers, volumetric god-rays near the surface, black-blue deep water, bioluminescent teal and amber accents (teal = danger and creatures, amber = the tavern, safety and loot). Bosses are monumental dark-fantasy silhouettes (a drowned knight, a great eel, a coral-crowned leviathan) drawn large against the dark. The tavern is warm amber firelight in a stone cellar. Every figure drawn: no emoji, no plain circles.	
+checklist	L2	unlisted	-	References: Dave the Diver (pixel sprites in a 3D sea, the dive and the catch), Elden Ring (monumental dark-fantasy bosses and mood), Dark Souls (stamina, roll, punish windows, dropped souls).	
+checklist	L3	unlisted	-	View: 2.5D · Camera: side-on follow2d with depth parallax.	
+checklist	F1	unlisted	-	Side-on stamina combat: light and heavy attack, roll with brief invulnerability, guard, flask that can be interrupted	
+checklist	F2	unlisted	-	3 depths, each a short minion area then a boss; 4 minion kinds each attacking differently	
+checklist	F3	unlisted	-	Boss hunt: bosses limp when hurt, lose parts and flee to rest, then return	
+checklist	F4	unlisted	-	Catch: kill or reel in fish, sea creatures and treasure, kept in a bag	
+checklist	F5	unlisted	-	Tavern (bonfire): rest to heal, refill flasks and save; sell the catch, cook it into a buff, spend souls on levels, upgrade the weapon	
+checklist	F6	unlisted	-	Progressive difficulty per depth: new minion kind, tougher stats, boss second phase	
+checklist	F7	unlisted	-	Drop-on-death with a retrievable bloodstain	
+checklist	S1	unlisted	-	Tavern: sell, cook and upgrade · in the slice	
+checklist	S2	unlisted	-	Catch and fishing: kill and reel in · in the slice	
+checklist	S3	unlisted	-	Progression: levels and weapon upgrades · in the slice	
+checklist	S4	unlisted	-	Boss hunt: limp, part loss, flee · in the slice	
+checklist	M1	unlisted	-	You wake at the tavern's hearth and walk to the dive door.	
+checklist	M2	unlisted	-	You descend, meet one drifting minion that teaches the stamina bar (swing, roll through its lunge), take your first catch, and the hook pays off: a boss's silhouette glides across the dark below while the tavern's amber light fades behind you.	
+checklist	C1	unlisted	-	Real trouble within the first minute or two: an elite minion that punishes rolling away.	
+checklist	C2	unlisted	-	Each depth adds a minion kind with a new attack, and bosses gain a second phase; minions are tougher and faster as you descend.	
+checklist	C3	unlisted	-	A death drops souls and catch where you fell and returns you to the tavern; dying before you retrieve them loses them for good.	
+checklist	C4	unlisted	-	Never trivially easy, never a wall in the first minute.	
+browser	HeadlessChrome/153.0.0.0
+scene	play	0	title
+scene	play	1	play
+digits	log	bold 20px "Courier New", ui-monospace, Menlo, monospace	tabular	0
+digits	log	bold 16px "Courier New", ui-monospace, Menlo, monospace	tabular	0
+measure	step-time	play	0.006	0.600	672
+lane	play	stop	11.2	353
+uncaught	play	0
+text	play	canvas	546,18,736,31	30.0	8.10	inside	THE DROWNED HEARTH
+text	play	canvas	1020,352,1057,363	28.5	10.79	inside	DIVE
+text	play	canvas	155,20,200,29	22.5	5.40	inside	HEALTH
+text	play	canvas	1068,13,1134,26	28.5	13.81	inside	Souls 0
+text	play	canvas	1077,34,1134,47	28.5	17.17	inside	Gold 0
+text	play	canvas	1059,55,1134,71	28.5	16.19	inside	Bag 0/10
+text	play	canvas	1005,77,1135,87	22.5	15.31	inside	Level 1   Blade 0
+text	play	canvas	148,561,486,574	22.5	5.60	inside	A D walk   E use what you stand at   P pause
+screen	play	drawn
+responds	changed	4

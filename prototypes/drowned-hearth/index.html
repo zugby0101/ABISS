@@ -307,7 +307,7 @@ function updPlayer(dt) {
   if (dive) {
     p.x = clamp(p.x, state.gate ? ARENA_L + 14 : 30, LVLEN - 30);
     p.y = clamp(p.y, TOPY, FLOOR - 34);
-  } else { p.x = clamp(p.x, 70, W - 70); p.y = TAV.y; }
+  } else { p.x = clamp(p.x, 70, TAV.door + 40); p.y = TAV.y; }
   if (p.hp > maxHP()) p.hp = maxHP();
 }
 function meleeHit(kind) {
@@ -877,7 +877,7 @@ function updTavern(dt) {
     { x: TAV.anvil, label: 'E: anvil (sharpen your blade)', fn: menuAnvil }, { x: TAV.door, label: 'E: the dive door', fn: menuDoor },
   ];
   st.near = null;
-  for (const s of stations) if (Math.abs(p.x - s.x) < 70) st.near = s;
+  for (const s of stations) if (Math.abs(p.x - s.x) < 85) st.near = s;
   if (st.near && tapped('KeyE')) st.near.fn();
   if (rng() < dt * 6) st.fx.push({ type: 'p', x: TAV.hearth + rnd(-30, 30), y: TAV.y - 90, vx: rnd(-10, 10), vy: -rnd(40, 90), c: '#ffb050', t: 0, life: 0.9, sz: 3, add: true });
   if (rng() < dt * 3) st.fx.push({ type: 'p', x: TAV.cauldron + rnd(-24, 24), y: TAV.y - 80, vx: rnd(-8, 8), vy: -rnd(30, 60), c: '#a8e8b0', t: 0, life: 1.4, sz: 4, add: false });
