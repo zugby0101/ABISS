@@ -3,8 +3,9 @@
 // Date: 2026-11-15
 // Every tuning value lives here, each with value, min, max and step. The game reads them live
 // through tune.<name> (index.html); the tweak panel, an add-on, writes them back here.
+window.CONFIG = (function () {
 const v = (value, min, max, step) => ({ value, min, max, step });
-window.CONFIG = {
+return {
   seed: 1, // every gameplay random call reads rng(), seeded from this (or ?seed= in the address)
   volume: v(0.5, 0, 1, 0.05),
 
@@ -85,3 +86,4 @@ window.CONFIG = {
   sell_mult: v(1, 0.3, 3, 0.05),
   renown_per_sale: v(80, 20, 400, 10),   // gold sold for one renown (+5% prices, one more patron)
 };
+})();

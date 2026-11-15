@@ -10,11 +10,13 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   body { font-variant-numeric: tabular-nums; }
-  canvas { display: block; margin: 0 auto; }
+  canvas { display: block; margin: 0 auto; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; outline: none; }
+  noscript { color: #fff; font: 20px sans-serif; display: block; padding: 24px; }
 </style>
 </head>
 <body>
-<canvas id="game"></canvas>
+<noscript>Drowned Hearth needs JavaScript switched on.</noscript>
+<canvas id="game" tabindex="0"></canvas>
 <script src="config.js"></script>
 <script>
 'use strict';
@@ -65,22 +67,66 @@ function text(s, x, y, size, c, align = 'center', shadow = true) {
 // ---- Input ---------------------------------------------------------------------------
 const down = new Set(), hit = new Set();
 const pressed = code => hit.has(code);
+function keyCode(e) { // e.code, or a guess from e.key on old browsers
+  if (e.code) return e.code;
+  const k = e.key || '';
+  if (k.length === 1 && /[a-z]/i.test(k)) return 'Key' + k.toUpperCase();
+  return { ' ': 'Space', Spacebar: 'Space', Esc: 'Escape', Left: 'ArrowLeft', Right: 'ArrowRight', Up: 'ArrowUp', Down: 'ArrowDown' }[k] || k;
+}
 addEventListener('keydown', e => {
+  const code = keyCode(e);
+  if (!e.repeat) { down.add(code); hit.add(code); }
+  if (code === 'Space' || code.indexOf('Arrow') === 0) e.preventDefault();
   startAudio();
-  if (!e.repeat) { down.add(e.code); hit.add(e.code); }
-  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
 });
-addEventListener('keyup', e => down.delete(e.code));
-addEventListener('pointerdown', () => startAudio());
+addEventListener('keyup', e => down.delete(keyCode(e)));
+addEventListener('pointerdown', () => { try { canvas.focus(); } catch (e) { /* ignore */ } startAudio(); });
 addEventListener('blur', () => down.clear());
 const held = (...c) => c.some(k => down.has(k));
 const tapped = (...c) => c.some(k => hit.has(k));
 
+// ---- Touch: on-screen buttons, shown once the screen is touched --------------------------
+let touchOn = false;
+const TBTN = [
+  { c: 'KeyA', x: 70, y: 620, r: 46, t: 'A' }, { c: 'KeyD', x: 210, y: 620, r: 46, t: 'D' }, { c: 'KeyW', x: 140, y: 548, r: 40, t: 'W' }, { c: 'KeyS', x: 140, y: 676, r: 36, t: 'S' },
+  { c: 'KeyJ', x: 1200, y: 640, r: 44, t: 'J' }, { c: 'KeyK', x: 1200, y: 540, r: 44, t: 'K' }, { c: 'KeyL', x: 1100, y: 650, r: 40, t: 'L' },
+  { c: 'ShiftLeft', x: 1100, y: 556, r: 40, t: 'Guard' }, { c: 'Space', x: 1000, y: 650, r: 40, t: 'Spear' }, { c: 'KeyR', x: 1000, y: 556, r: 40, t: 'R' },
+  { c: 'KeyE', x: 1200, y: 436, r: 44, t: 'E' }, { c: 'KeyP', x: 1226, y: 190, r: 30, t: 'P' },
+];
+const touches = new Map();
+function canvasPoint(e) { const r = canvas.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; }
+function touchPress(e) {
+  if (e.pointerType === 'mouse') return;
+  touchOn = true; startAudio(); e.preventDefault();
+  const [x, y] = canvasPoint(e);
+  let code = null;
+  if (scene === 'play' || scene === 'pause') for (const b of TBTN) if (hyp(x - b.x, y - b.y) < b.r + 12) code = b.c;
+  if (!code && scene !== 'play') code = 'Enter'; // tap anywhere to start, go on or wake
+  if (scene === 'play' && state && state.menu && !code) code = 'KeyE';
+  if (code) { touches.set(e.pointerId, code); down.add(code); hit.add(code); }
+}
+function touchRelease(e) { const c = touches.get(e.pointerId); if (c) { down.delete(c); touches.delete(e.pointerId); } }
+canvas.addEventListener('pointerdown', touchPress);
+canvas.addEventListener('pointerup', touchRelease); canvas.addEventListener('pointercancel', touchRelease);
+function drawTouch() {
+  if (!touchOn || (scene !== 'play' && scene !== 'pause')) return;
+  const held2 = new Set(touches.values());
+  for (const b of TBTN) {
+    ctx.globalAlpha = held2.has(b.c) ? 0.6 : 0.3; ctx.fillStyle = '#0a1a24'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 6.3); ctx.fill();
+    ctx.strokeStyle = '#cfe'; ctx.lineWidth = 3; ctx.stroke(); ctx.globalAlpha = 0.9; text(b.t, b.x, b.y, b.t.length > 2 ? 16 : 24, '#fff', 'center', false); ctx.globalAlpha = 1;
+  }
+}
+
 // ---- Audio ---------------------------------------------------------------------------
 let audio = null, muted = false;
 function startAudio() {
+  try { startAudio2(); } catch (e) { audio = audio || { ac: null }; } // no sound is better than no game
+}
+function startAudio2() {
   if (!audio) {
-    const ac = window.GAME_AUDIO || new (window.AudioContext || window.webkitAudioContext)();
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!window.GAME_AUDIO && !AC) { audio = { ac: null }; return; }
+    const ac = window.GAME_AUDIO || new AC();
     const out = ac.createGain(); out.gain.value = muted ? 0 : tune.volume;
     out.connect(ac.destination); audio = { ac, out };
     try { // a low drone under the sea
@@ -89,12 +135,12 @@ function startAudio() {
       o.connect(f); f.connect(g); g.connect(out); o.start(); audio.drone = o;
     } catch (e) { /* no drone */ }
   }
-  if (audio.ac.state === 'suspended') audio.ac.resume();
+  if (audio.ac && audio.ac.state === 'suspended') audio.ac.resume();
 }
-function setMuted(m) { muted = m; if (audio) audio.out.gain.value = m ? 0 : tune.volume; }
+function setMuted(m) { muted = m; if (audio && audio.out) audio.out.gain.value = m ? 0 : tune.volume; }
 addEventListener('tune', () => setMuted(muted));
 function tone(freq, dur, type = 'square', vol = 0.3, slide = 0) {
-  if (!audio || muted) return;
+  if (!audio || !audio.ac || muted) return;
   const t = audio.ac.currentTime, o = audio.ac.createOscillator(), g = audio.ac.createGain();
   o.type = type; o.frequency.setValueAtTime(freq, t);
   if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t + dur);
@@ -1052,7 +1098,7 @@ function drawDiver(p, t) {
     }
   });
   ctx.restore();
-  if (p.act === 'heavy' && k > 0.4 && k < 0.7) { ctx.strokeStyle = 'rgba(220,250,255,0.5)'; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(p.x, p.y, 70 * (p.face), -1.3, 1.1, p.face < 0); ctx.stroke(); }
+  if (p.act === 'heavy' && k > 0.4 && k < 0.7) { ctx.strokeStyle = 'rgba(220,250,255,0.5)'; ctx.lineWidth = 6; ctx.beginPath(); if (p.face > 0) ctx.arc(p.x, p.y, 70, -1.3, 1.1, false); else ctx.arc(p.x, p.y, 70, Math.PI - 1.1, Math.PI + 1.3, false); ctx.stroke(); }
   glowQ.push([p.x + p.face * 12, p.y - 20, 70, '60,240,220', 0.25]);
 }
 function drawAngler(m) {
@@ -1441,7 +1487,7 @@ function drawTitle() {
   text('DROWNED HEARTH', W / 2, 150, 76, '#ffe3b0'); text('hunt the deep, feed the hearth', W / 2, 212, 24, '#9fd8e0');
   CONTROLS.forEach((c, i) => text(c, W / 2, 330 + i * 34, 22, '#cfe'));
   text('Enter: new game' + (loadSave() ? '     C: continue' : ''), W / 2, 560, 28, '#fff6d0');
-  text('Beat three bosses, then the descent never ends', W / 2, 610, 18, '#8fb8c8');
+  text('Beat three bosses, then the descent never ends', W / 2, 610, 18, '#8fb8c8'); text('Touch screen: tap to start, on-screen buttons appear', W / 2, 640, 16, '#6f98a8');
 }
 const scenes = {
   figures: { update(dt) { state.t += dt; }, draw() { figuresDraw(); } },
@@ -1498,9 +1544,11 @@ function tick() {
   ALPHA = acc / STEP;
   drawFrame();
 }
-function drawFrame() { scenes[scene].draw(); }
-function frame() { tick(); requestAnimationFrame(frame); }
-function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) tick(); }
+function drawFrame() { scenes[scene].draw(); drawTouch(); }
+function frame() { requestAnimationFrame(frame); safeTick(); }
+let errs = 0;
+function safeTick() { try { tick(); } catch (e) { if (errs++ < 5) console.error(e); last = clock.now(); acc = 0; } }
+function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) safeTick(); }
 
 window.game = {
   get scene() { return scene; },
