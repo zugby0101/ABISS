@@ -48,10 +48,10 @@ Real trouble within the first minute or two: an elite minion that punishes rolli
 - Fail: death drops souls and catch; a second death before retrieving them loses them.
 
 ## Features
-- [ ] Side-on stamina combat: light and heavy attack, roll with brief invulnerability, guard, flask that can be interrupted
-- [ ] 3 depths, each a short minion area then a boss; 4 minion kinds each attacking differently
+- [x] Side-on stamina combat: light and heavy attack, roll with brief invulnerability, guard, flask that can be interrupted
+- [x] 3 depths, each a short minion area then a boss; 4 minion kinds each attacking differently
 - [ ] Boss hunt: bosses limp when hurt, lose parts and flee to rest, then return
-- [ ] Catch: kill or reel in fish, sea creatures and treasure, kept in a bag
+- [x] Catch: kill or reel in fish, sea creatures and treasure, kept in a bag
 - [ ] Tavern (bonfire): rest to heal, refill flasks and save; sell the catch, cook it into a buff, spend souls on levels, upgrade the weapon
 - [ ] Progressive difficulty per depth: new minion kind, tougher stats, boss second phase
 - [ ] Drop-on-death with a retrievable bloodstain

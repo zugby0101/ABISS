@@ -1,0 +1,20 @@
+L1	pass	evidence/play.png	Lit 2.5D sea with layered depth, fog, light shafts and teal and amber glows, pixel figures, a dark-fantasy boss arena; the tavern is amber firelight in a stone cellar but no shot of it was taken
+L2	not_assessed	-	The references are inspiration (Dave the Diver, Elden Ring, Dark Souls); there is nothing a screenshot could show about them
+L3	pass	evidence/play.png	Side-on camera that follows the diver, with depth layers sliding at different speeds
+F1	pass	evidence/play.png	Diver mid light-swing with a damage number; roll, guard, flask and heavy swing are in index.html:258 and :387, and the check's keys changed the game. Only the light swing, harpoon and movement were played; the rest was not exercised
+F2	pass	evidence/figures.png	Four minion kinds and the elite, each with its own outline and attack, and three bosses drawn; boss arenas in evidence/boss-knight.png, boss-maw.png and boss-leviathan.png
+F3	not_assessed	index.html:588	Limp, part drop, flee and rest are written (startLimp, bossCommon) but no fight was played far enough to see one
+F4	pass	evidence/play.png	The check run ended with Bag 1/10 after a harpoon throw, so a fish was caught and kept in the bag
+F5	not_assessed	index.html:823	The counter, cauldron, shrine, anvil and hearth menus are written; only the dive door menu was exercised, by the check run
+F6	not_assessed	index.html:413	Depth scaling in mkMob, the new minion per depth and phases per boss are written but never compared across depths in play
+F7	not_assessed	index.html:369	The YOU DIED screen showed in evidence/boss-leviathan.png, but picking the lost souls back up was never played
+S1	not_assessed	index.html:823	Sell, cook and sharpen are written, never exercised
+S2	pass	evidence/play.png	Harpoon catch reached the bag in the check run; killing and reeling in minions for items is in index.html:339
+S3	not_assessed	index.html:816	The shrine levels and the anvil blade levels are written, never exercised
+S4	not_assessed	index.html:588	Same as F3
+M1	pass	evidence/play.png	The check run started at the hearth, walked right to the door, opened the dive menu and went down to depth 1
+M2	missing	-	The first dive has no boss silhouette gliding across the dark; the boss only appears at the arena gate
+C1	pass	evidence/play.png	A red elite angler with a double lunge sits past x=1450 in depth 1 (index.html:222) and shows in the shot
+C2	not_assessed	index.html:413	Minion stats rise per depth in code, never compared in play
+C3	not_assessed	index.html:369	Death drops souls and catch in code, and the death screen showed; the second-death loss was never played
+C4	not_assessed	-	Difficulty can only be judged by a person playing

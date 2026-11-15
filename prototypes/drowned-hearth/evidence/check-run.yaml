@@ -1,0 +1,140 @@
+# The one-shot's small check (check-run/1).
+# Written by one-shot-check.sh --record: the results are /prototype's reading of
+# evidence/self-check.tsv; never edited by hand.
+kind: check-run/1
+engine: web
+browser: "HeadlessChrome/153.0.0.0"
+time: "2026-11-15 23:06:42"
+checks:
+  - id: boots
+    result: pass
+    evidence:
+      - "evidence/self-check.tsv"
+  - id: shot
+    result: not_run
+    mark: not assessed
+    why: "the scripted run saved no screenshot of its own; evidence/play.png is a separate hand-taken screenshot of depth 1 from the same game"
+    evidence:
+  - id: outlines
+    result: pass
+    evidence:
+      - "evidence/figures.png"
+  - id: brief-words
+    result: pass
+    evidence:
+      - "evidence/brief-words.tsv"
+  - id: emoji
+    result: pass
+    evidence:
+      - "evidence/self-check.tsv"
+  - id: nearest-game
+    result: pass
+    evidence:
+      - "evidence/nearest-game.txt"
+brief_checklist:
+  - id: L1
+    result: pass
+    evidence: "evidence/play.png"
+    item: "Look: 2.5D, pixel sprites on a flat plane moving through a lit 3D sea: parallax depth layers, volumetric god-rays near the surface, black-blue deep water, bioluminescent teal and amber accents (teal = danger and creatures, amber = the tavern, safety and loot). Bosses are monumental dark-fantasy silhouettes (a drowned knight, a great eel, a coral-crowned leviathan) drawn large against the dark. The tavern is warm amber firelight in a stone cellar. Every figure drawn: no emoji, no plain circles."
+  - id: L2
+    result: not_run
+    mark: not assessed
+    why: "The references are inspiration (Dave the Diver, Elden Ring, Dark Souls); there is nothing a screenshot could show about them"
+    item: "References: Dave the Diver (pixel sprites in a 3D sea, the dive and the catch), Elden Ring (monumental dark-fantasy bosses and mood), Dark Souls (stamina, roll, punish windows, dropped souls)."
+  - id: L3
+    result: pass
+    evidence: "evidence/play.png"
+    item: "View: 2.5D · Camera: side-on follow2d with depth parallax."
+  - id: F1
+    result: pass
+    evidence: "evidence/play.png"
+    item: "Side-on stamina combat: light and heavy attack, roll with brief invulnerability, guard, flask that can be interrupted"
+  - id: F2
+    result: pass
+    evidence: "evidence/figures.png"
+    item: "3 depths, each a short minion area then a boss; 4 minion kinds each attacking differently"
+  - id: F3
+    result: not_run
+    mark: not assessed
+    why: "Limp, part drop, flee and rest are written (startLimp, bossCommon) but no fight was played far enough to see one"
+    evidence: "index.html:588"
+    item: "Boss hunt: bosses limp when hurt, lose parts and flee to rest, then return"
+  - id: F4
+    result: pass
+    evidence: "evidence/play.png"
+    item: "Catch: kill or reel in fish, sea creatures and treasure, kept in a bag"
+  - id: F5
+    result: not_run
+    mark: not assessed
+    why: "The counter, cauldron, shrine, anvil and hearth menus are written; only the dive door menu was exercised, by the check run"
+    evidence: "index.html:823"
+    item: "Tavern (bonfire): rest to heal, refill flasks and save; sell the catch, cook it into a buff, spend souls on levels, upgrade the weapon"
+  - id: F6
+    result: not_run
+    mark: not assessed
+    why: "Depth scaling in mkMob, the new minion per depth and phases per boss are written but never compared across depths in play"
+    evidence: "index.html:413"
+    item: "Progressive difficulty per depth: new minion kind, tougher stats, boss second phase"
+  - id: F7
+    result: not_run
+    mark: not assessed
+    why: "The YOU DIED screen showed in evidence/boss-leviathan.png, but picking the lost souls back up was never played"
+    evidence: "index.html:369"
+    item: "Drop-on-death with a retrievable bloodstain"
+  - id: S1
+    result: not_run
+    mark: not assessed
+    why: "Sell, cook and sharpen are written, never exercised"
+    evidence: "index.html:823"
+    item: "Tavern: sell, cook and upgrade · in the slice"
+  - id: S2
+    result: pass
+    evidence: "evidence/play.png"
+    item: "Catch and fishing: kill and reel in · in the slice"
+  - id: S3
+    result: not_run
+    mark: not assessed
+    why: "The shrine levels and the anvil blade levels are written, never exercised"
+    evidence: "index.html:816"
+    item: "Progression: levels and weapon upgrades · in the slice"
+  - id: S4
+    result: not_run
+    mark: not assessed
+    why: "Same as F3"
+    evidence: "index.html:588"
+    item: "Boss hunt: limp, part loss, flee · in the slice"
+  - id: M1
+    result: pass
+    evidence: "evidence/play.png"
+    item: "You wake at the tavern's hearth and walk to the dive door."
+  - id: M2
+    result: fail
+    why: missing
+    item: "You descend, meet one drifting minion that teaches the stamina bar (swing, roll through its lunge), take your first catch, and the hook pays off: a boss's silhouette glides across the dark below while the tavern's amber light fades behind you."
+  - id: C1
+    result: pass
+    evidence: "evidence/play.png"
+    item: "Real trouble within the first minute or two: an elite minion that punishes rolling away."
+  - id: C2
+    result: not_run
+    mark: not assessed
+    why: "Minion stats rise per depth in code, never compared in play"
+    evidence: "index.html:413"
+    item: "Each depth adds a minion kind with a new attack, and bosses gain a second phase; minions are tougher and faster as you descend."
+  - id: C3
+    result: not_run
+    mark: not assessed
+    why: "Death drops souls and catch in code, and the death screen showed; the second-death loss was never played"
+    evidence: "index.html:369"
+    item: "A death drops souls and catch where you fell and returns you to the tavern; dying before you retrieve them loses them for good."
+  - id: C4
+    result: not_run
+    mark: not assessed
+    why: "Difficulty can only be judged by a person playing"
+    item: "Never trivially easy, never a wall in the first minute."
+measures:
+  - id: step-time
+    value: 1.300
+    unit: ms
+    by: browser
+    detail: "mean 0.032 ms, slowest 1.300 ms, 672 steps"

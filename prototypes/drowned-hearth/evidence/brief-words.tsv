@@ -1,0 +1,3 @@
+2d	Figures are flat pixel sprites on one side-on plane; the camera follows the diver sideways.	evidence/play.png
+3d	Built as 2.5D, never a 3D engine: far, mid, near and front layers slide at different speeds, the floor is three bands at three speeds, fog and a lantern light sit between them, and light shafts fall from the surface. The depth is faked, not modelled.	evidence/play.png
+leads fights	The soulslike leads the fights: stamina swings, a roll with safe frames, a guard, an interruptible flask, readable wind-ups on every enemy.	evidence/play.png
