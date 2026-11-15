@@ -1,0 +1,1508 @@
+<!doctype html>
+<!-- PROTOTYPE - NOT FOR PRODUCTION -->
+<!-- Question: Does a hard, readable boss fight feel better when what you win from it feeds a tavern you want to go back to? -->
+<!-- Date: 2026-11-15 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drowned Hearth</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { font-variant-numeric: tabular-nums; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script src="config.js"></script>
+<script>
+'use strict';
+// ---- Built to be checked ----------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value }); // live: tune.speed is CONFIG.speed.value
+const STEP = 1 / 60;
+const W = 1280, H = 720;
+const PIXEL = false;
+const FONT = '"Courier New", ui-monospace, Menlo, monospace';
+const TITLE = 'Drowned Hearth';
+const CONTROLS = ['A D W S: swim', 'J: light swing   K: heavy swing', 'L: roll   Shift: guard', 'R: drink flask   Space: harpoon', 'E: use / open   P: pause   M: mute'];
+const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 };
+const CHEAP = params.get('render') === 'cheap';
+let seed;
+function rng() { // mulberry32; every gameplay random call reads this, never Math.random
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+function mkr(s) { // a private seeded stream: the level layout of a depth is always the same
+  return () => { s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ (s >>> 15), s | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+const events = [];
+
+// ---- Screen ---------------------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function fit() {
+  const k = Math.min(innerWidth / W, innerHeight / H);
+  const s = PIXEL ? Math.max(1, Math.floor(k)) : k;
+  const r = PIXEL ? 1 : s * (devicePixelRatio || 1);
+  canvas.width = Math.round(W * r); canvas.height = Math.round(H * r);
+  canvas.style.width = Math.round(W * s) + 'px'; canvas.style.height = Math.round(H * s) + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((innerHeight - H * s) / 2)) + 'px';
+  canvas.style.imageRendering = PIXEL ? 'pixelated' : 'auto';
+  ctx.setTransform(r, 0, 0, r, 0, 0); ctx.imageSmoothingEnabled = !PIXEL;
+}
+addEventListener('resize', fit); fit();
+function clear(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, W, H); }
+function text(s, x, y, size, c, align = 'center', shadow = true) {
+  ctx.font = `bold ${size}px ${FONT}`; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  if (shadow) { ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillText(s, x + 2, y + 2); }
+  ctx.fillStyle = c; ctx.fillText(s, x, y);
+}
+
+// ---- Input ---------------------------------------------------------------------------
+const down = new Set(), hit = new Set();
+const pressed = code => hit.has(code);
+addEventListener('keydown', e => {
+  startAudio();
+  if (!e.repeat) { down.add(e.code); hit.add(e.code); }
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => down.delete(e.code));
+addEventListener('pointerdown', () => startAudio());
+addEventListener('blur', () => down.clear());
+const held = (...c) => c.some(k => down.has(k));
+const tapped = (...c) => c.some(k => hit.has(k));
+
+// ---- Audio ---------------------------------------------------------------------------
+let audio = null, muted = false;
+function startAudio() {
+  if (!audio) {
+    const ac = window.GAME_AUDIO || new (window.AudioContext || window.webkitAudioContext)();
+    const out = ac.createGain(); out.gain.value = muted ? 0 : tune.volume;
+    out.connect(ac.destination); audio = { ac, out };
+    try { // a low drone under the sea
+      const o = ac.createOscillator(), g = ac.createGain(), f = ac.createBiquadFilter();
+      o.type = 'sawtooth'; o.frequency.value = 55; f.type = 'lowpass'; f.frequency.value = 160; g.gain.value = 0.05;
+      o.connect(f); f.connect(g); g.connect(out); o.start(); audio.drone = o;
+    } catch (e) { /* no drone */ }
+  }
+  if (audio.ac.state === 'suspended') audio.ac.resume();
+}
+function setMuted(m) { muted = m; if (audio) audio.out.gain.value = m ? 0 : tune.volume; }
+addEventListener('tune', () => setMuted(muted));
+function tone(freq, dur, type = 'square', vol = 0.3, slide = 0) {
+  if (!audio || muted) return;
+  const t = audio.ac.currentTime, o = audio.ac.createOscillator(), g = audio.ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(audio.out); o.start(t); o.stop(t + dur);
+}
+
+// ---- Helpers ---------------------------------------------------------------------------
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const sgn = v => (v < 0 ? -1 : 1);
+const hyp = Math.hypot;
+const rnd = (a, b) => a + rng() * (b - a);
+const pick = a => a[Math.floor(rng() * a.length)];
+const U = 3; // one drawn pixel
+const snap = v => Math.round(v / U) * U;
+function R(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x * U, y * U, w * U, h * U); } // a block in pixel units
+function fig(x, y, face, scale, fn) { ctx.save(); ctx.translate(snap(x), snap(y)); ctx.scale(face * scale, scale); fn(); ctx.restore(); }
+function glow(x, y, r, rgb, a) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, `rgba(${rgb},${a})`); g.addColorStop(1, `rgba(${rgb},0)`);
+  ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  ctx.globalCompositeOperation = 'source-over';
+}
+function poly(pts, c) { ctx.fillStyle = c; ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath(); ctx.fill(); }
+function hit2(ax, ay, ahw, ahh, bx, by, bhw, bhh) { return Math.abs(ax - bx) < ahw + bhw && Math.abs(ay - by) < ahh + bhh; }
+
+// ---- World constants and data ----------------------------------------------------------
+const FLOOR = 640, TOPY = 100, ARENA_L = 2560, ARENA_R = 3960, LVLEN = 4000, ROPE_X = 90;
+const TAV = { y: 598, hearth: 200, shrine: 395, cauldron: 585, counter: 775, anvil: 945, door: 1135 };
+const ITEMS = {
+  silverfin: { n: 'Silverfin', v: 8, dish: 'Grilled Silverfin', fx: { hp: 25 }, desc: '+25 max health' },
+  glowfin: { n: 'Glowfin', v: 14, dish: 'Glowfin Broth', fx: { stam: 0.3 }, desc: '+30% stamina regen' },
+  squid: { n: 'Ink Squid', v: 18, dish: 'Inked Noodles', fx: { o2: 45 }, desc: '+45s of air' },
+  pearl: { n: 'Coral Pearl', v: 45 },
+  lamp: { n: 'Angler Lamp', v: 22, dish: 'Lantern Soup', fx: { dmg: 0.12, light: 1 }, desc: '+12% damage, brighter light' },
+  bell: { n: 'Jelly Bell', v: 20, dish: 'Jelly Pudding', fx: { flask: 0.15 }, desc: 'flasks heal 15% more' },
+  claw: { n: 'Crab Claw', v: 26, dish: 'Crab Roast', fx: { def: 0.15 }, desc: '15% less damage taken' },
+  fang: { n: 'Eel Fang', v: 30, dish: 'Eel Skewer', fx: { iframe: 0.1 }, desc: 'longer safe time in a roll' },
+  helm: { n: "Knight's Crest", v: 70 },
+  plate: { n: "Knight's Plate", v: 120 },
+  scale: { n: 'Maw Scale', v: 80 },
+  tooth: { n: 'Maw Tooth', v: 140 },
+  shard: { n: 'Crown Shard', v: 110 },
+  eye: { n: 'Leviathan Eye', v: 180 },
+};
+const DROPS = { angler: [['lamp', 0.7], ['glowfin', 1]], jelly: [['bell', 0.6], ['squid', 1]], crab: [['claw', 0.85], ['silverfin', 1]], eel: [['fang', 0.8], ['glowfin', 1]] };
+const BOSSDEF = {
+  1: { k: 'knight', name: 'The Drowned Knight', th: [0.5], parts: ['helm'], fin: 'plate' },
+  2: { k: 'maw', name: 'Maw of the Reef', th: [0.66, 0.33], parts: ['scale', 'scale'], fin: 'tooth' },
+  3: { k: 'levi', name: 'The Crowned Leviathan', th: [0.75, 0.5, 0.25], parts: ['shard', 'shard', 'shard'], fin: 'eye' },
+};
+const DEPTHS = ['', 'The Shallow Wreck', 'The Kelp Cathedral', 'The Black Trench'];
+const depthName = d => DEPTHS[d] || `The Abyss, floor ${d - 3}`;
+const WEAPON_COST = [60, 110, 170, 240, 330], WEAPON_NEEDS = { 1: 'plate', 3: 'tooth' };
+
+// ---- State ----------------------------------------------------------------------------
+let scene, state;
+const cam = { x: 0, sh: 0 };
+function newSave() {
+  return { lvl: 1, vig: 0, end: 0, str: 0, souls: 0, gold: 0, bag: {}, wlvl: 0, tank: 0, flaskUp: 0, bagUp: 0,
+    cleared: {}, maxDepth: 1, sold: 0, endless: false, endlessDepth: 4, stain: null, dish: null, beaten: 0, cooked: 0 };
+}
+const dishFx = () => (state.S.dish && ITEMS[state.S.dish] ? ITEMS[state.S.dish].fx : {});
+const maxHP = () => tune.hp + 10 * state.S.vig + (dishFx().hp || 0);
+const maxStam = () => tune.stamina + 8 * state.S.end;
+const maxFlasks = () => tune.flasks + state.S.flaskUp;
+const maxO2 = () => tune.oxygen + 25 * state.S.tank + (dishFx().o2 || 0);
+const bagCap = () => tune.bag_cap + 2 * state.S.bagUp;
+const bagCount = () => Object.values(state.S.bag).reduce((a, b) => a + b, 0);
+const dmgMul = () => (1 + 0.08 * state.S.str) * (1 + tune.weapon_dmg * state.S.wlvl) * (1 + (dishFx().dmg || 0));
+const renown = () => Math.min(10, Math.floor(state.S.sold / tune.renown_per_sale));
+const sellPrice = id => Math.round(ITEMS[id].v * tune.sell_mult * (1 + 0.05 * renown()));
+const levelCost = () => Math.round(tune.level_cost + tune.level_growth * (state.S.lvl - 1));
+
+function newPlayer() {
+  return { x: TAV.hearth + 70, y: TAV.y, vx: 0, vy: 0, face: 1, hp: maxHP(), stam: maxStam(), o2: maxO2(), flasks: maxFlasks(),
+    act: null, at: 0, dur: 0, inv: 0, flash: 0, cd: 0, regen: 0, buf: null, bufT: 0, hitSet: new Set(), guard: false,
+    rdx: 1, rdy: 0, stun: 0, swung: false, anim: 0 };
+}
+function reset() {
+  seed = Number(params.get('seed')) || CONFIG.seed;
+  state = { t: 0, score: 0, gained: '', mode: 'tavern', S: newSave(), depth: 1, mobs: [], proj: [], haz: [], fx: [], fish: [], chests: [],
+    picks: [], boss: null, gate: false, exit: null, menu: null, toast: null, banner: null, hs: 0, bg: null, deathT: 0,
+    victoryT: 0, near: null, line: null, snow: [] };
+  state.p = newPlayer();
+  for (let i = 0; i < 70; i++) state.snow.push({ x: rng() * W, y: rng() * H, z: 0.3 + rng() * 1.1, s: rng() * 6 });
+  cam.x = 0; cam.sh = 0;
+  if (params.get('dive')) { const d = clamp(Number(params.get('dive')) || 1, 1, 9); state.S.maxDepth = 9; startDive(d); state.p.x = Number(params.get('x')) || state.p.x; }
+}
+function toast(s, t = 2.4) { state.toast = { s, t }; }
+function banner(s, sub, t = 3) { state.banner = { s, sub, t, t0: t }; }
+function fxText(x, y, s, c = '#fff', size = 22) { state.fx.push({ type: 'txt', x, y, s, c, size, t: 0, life: 1.1 }); }
+function burst(x, y, n, c, sp = 160, life = 0.6, add = false) {
+  for (let i = 0; i < n; i++) { const a = rng() * 6.283, v = rnd(0.3, 1) * sp; state.fx.push({ type: 'p', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, c, t: 0, life: life * rnd(0.6, 1), sz: rnd(2, 5), add }); }
+}
+function giveItem(id, n = 1) {
+  if (bagCount() + n > bagCap()) { toast('Your bag is full: the catch sinks away'); return false; }
+  state.S.bag[id] = (state.S.bag[id] || 0) + n;
+  fxText(state.p.x, state.p.y - 50, '+' + ITEMS[id].n, '#9ff0e0', 18);
+  tone(660, 0.1, 'triangle', 0.18); return true;
+}
+function giveSouls(n) { state.S.souls += n; state.score += n; fxText(state.p.x, state.p.y - 76, '+' + n + ' souls', '#ffd27a', 18); }
+
+// ---- Levels --------------------------------------------------------------------------
+function startDive(d, keep) {
+  const st = state, p = st.p;
+  st.mode = 'dive'; st.depth = d; st.menu = null; st.mobs = []; st.proj = []; st.haz = []; st.fish = []; st.chests = [];
+  st.picks = []; st.gate = false; st.exit = null; st.boss = null; st.fx = []; st.line = null; st.bossIntro = false;
+  const r = mkr(d * 7919 + 13), kd = ((d - 1) % 3) + 1;
+  const kinds = ['angler', 'jelly']; if (kd >= 2 || d > 3) kinds.push('crab'); if (kd >= 3 || d > 3) kinds.push('eel');
+  let x = 760, i = 0;
+  while (x < 2400) {
+    let k = i === 0 ? 'angler' : kinds[Math.floor(r() * kinds.length)];
+    if (i === 2 && d > 1) k = kinds[Math.min(kinds.length - 1, kd === 1 ? 1 : kd)];
+    if (i === 1 && d === 1) k = 'jelly';
+    let elite = false;
+    if (d === 1 && x > 1450 && !st.eliteDone) { k = 'angler'; elite = true; st.eliteDone = true; }
+    else if (d > 1 && i % 5 === 4) elite = true;
+    const y = k === 'crab' ? FLOOR - 26 : k === 'eel' ? FLOOR - 14 : k === 'jelly' ? 170 + r() * 230 : 200 + r() * 320;
+    st.mobs.push(mkMob(k, x, y, { elite }));
+    x += 150 + r() * 90; i++;
+  }
+  st.eliteDone = false;
+  for (let s = 0; s < 6; s++) {
+    const sx = 480 + s * 400 + r() * 150, sy = 170 + r() * 340, n = 3 + Math.floor(r() * 3);
+    for (let j = 0; j < n; j++) st.fish.push({ x: sx + r() * 70, y: sy + r() * 60, vx: -30 - r() * 20, face: -1, ph: r() * 6, dead: false });
+  }
+  st.chests.push({ x: 900 + r() * 500, open: false }, { x: 1750 + r() * 500, open: false });
+  st.bg = genBG(d); st.boss = mkBoss(d); st.shake = 0;
+  st.stain = st.S.stain && st.S.stain.depth === d ? st.S.stain : null;
+  if (!keep) { p.x = ROPE_X + 90; p.y = 300; p.vx = 0; p.vy = 0; p.o2 = maxO2(); }
+  p.face = 1; p.act = null; p.stun = 0; cam.x = 0;
+  banner(depthName(d), d > 3 ? 'Endless descent' : 'Depth ' + d, 2.6);
+}
+function enterTavern(rest) {
+  const st = state, p = st.p;
+  st.mode = 'tavern'; st.menu = null; st.mobs = []; st.proj = []; st.haz = []; st.fx = []; st.boss = null; st.gate = false;
+  st.exit = null; st.line = null; st.picks = [];
+  p.x = TAV.door - 90; p.y = TAV.y; p.vx = 0; p.vy = 0; p.act = null; p.stun = 0; p.face = -1; p.o2 = maxO2();
+  if (rest) restAll();
+  cam.x = 0;
+}
+function restAll() {
+  const p = state.p;
+  p.hp = maxHP(); p.stam = maxStam(); p.flasks = maxFlasks(); p.o2 = maxO2(); save();
+}
+function save() { try { localStorage.setItem('drowned-hearth', JSON.stringify(state.S)); } catch (e) { /* no storage */ } }
+function loadSave() { try { const s = JSON.parse(localStorage.getItem('drowned-hearth')); return s && s.lvl ? s : null; } catch (e) { return null; } }
+
+// ---- The diver ------------------------------------------------------------------------
+function spend(n) { const p = state.p; p.stam = Math.max(0, p.stam - n); p.regen = tune.stam_delay; }
+function buf(a) { const p = state.p; p.buf = a; p.bufT = 0.28; }
+function startAct(a, ix, iy) {
+  const p = state.p;
+  if (a === 'light' && p.stam > 0) {
+    spend(tune.light_cost); p.act = 'light'; p.dur = tune.light_time; p.at = 0; p.hitSet = new Set(); p.buf = null; tone(240, 0.09, 'sawtooth', 0.1, -90);
+  } else if (a === 'heavy' && p.stam > 0) {
+    spend(tune.heavy_cost); p.act = 'heavy'; p.dur = tune.heavy_time; p.at = 0; p.hitSet = new Set(); p.buf = null; tone(150, 0.2, 'sawtooth', 0.12, -60);
+  } else if (a === 'roll' && p.stam > 0) {
+    spend(tune.roll_cost); p.act = 'roll'; p.dur = tune.roll_time; p.at = 0; p.buf = null;
+    const m = hyp(ix, iy); if (m) { p.rdx = ix / m; p.rdy = iy / m; if (ix) p.face = ix; } else { p.rdx = p.face; p.rdy = 0; }
+    tone(300, 0.14, 'triangle', 0.1, 200);
+  } else if (a === 'flask') {
+    if (p.flasks > 0 && p.hp < maxHP()) { p.act = 'drink'; p.dur = tune.flask_time; p.at = 0; p.flasks--; p.buf = null; tone(420, 0.3, 'sine', 0.12, 120); }
+    else p.buf = null;
+  } else if (a === 'harpoon') {
+    p.buf = null; if (p.cd <= 0) { p.cd = tune.harpoon_cd; fireHarpoon(); }
+  } else p.buf = null;
+}
+function updPlayer(dt) {
+  const p = state.p, dive = state.mode === 'dive';
+  p.inv -= dt; p.flash -= dt; p.cd -= dt; p.stun -= dt; p.anim += dt; p.bufT -= dt;
+  if (p.bufT <= 0) p.buf = null;
+  if (dive) {
+    if (tapped('KeyJ')) buf('light'); if (tapped('KeyK')) buf('heavy'); if (tapped('KeyL')) buf('roll');
+    if (tapped('KeyR')) buf('flask'); if (tapped('Space')) buf('harpoon');
+  }
+  const ix = (held('KeyD', 'ArrowRight') ? 1 : 0) - (held('KeyA', 'ArrowLeft') ? 1 : 0);
+  const iy = dive ? (held('KeyS', 'ArrowDown') ? 1 : 0) - (held('KeyW', 'ArrowUp') ? 1 : 0) : 0;
+  if (p.act) {
+    p.at += dt;
+    if (p.at >= p.dur) {
+      if (p.act === 'drink') { p.hp = Math.min(maxHP(), p.hp + maxHP() * tune.flask_heal * (1 + (dishFx().flask || 0))); fxText(p.x, p.y - 56, 'restored', '#9ff0e0', 18); burst(p.x, p.y, 10, '#8ff', 90, 0.6, true); }
+      p.act = null; p.at = 0;
+    }
+  }
+  p.guard = dive && !p.act && p.stun <= 0 && held('ShiftLeft', 'ShiftRight') && p.stam > 0;
+  if (dive && !p.act && p.stun <= 0 && p.buf) startAct(p.buf, ix, iy);
+  p.regen -= dt;
+  if (p.regen <= 0 && p.act !== 'light' && p.act !== 'heavy' && p.act !== 'roll') {
+    p.stam = Math.min(maxStam(), p.stam + tune.stam_regen * (1 + (dishFx().stam || 0)) * (p.guard ? 0.4 : 1) * dt);
+  }
+  if (dive && p.act && (p.act === 'light' || p.act === 'heavy')) {
+    const k = p.at / p.dur;
+    const on = p.act === 'light' ? k > 0.28 && k < 0.62 : k > 0.42 && k < 0.64;
+    if (on) meleeHit(p.act);
+  }
+  // movement: swimming has weight
+  if (p.stun > 0) { p.vx *= 0.9; p.vy *= 0.9; }
+  else if (p.act === 'roll') { const s = tune.roll_speed * (1 - (p.at / p.dur) * 0.55); p.vx = p.rdx * s; p.vy = p.rdy * s * 0.8; }
+  else {
+    const m = p.act === 'light' || p.act === 'heavy' ? 0.3 : p.act === 'drink' ? 0.25 : p.guard ? 0.5 : 1;
+    const k = Math.min(1, dt * 9);
+    p.vx += (ix * tune.move_speed * m - p.vx) * k;
+    p.vy += (iy * tune.swim_speed * m - p.vy) * k;
+    if (ix && !p.act) p.face = ix;
+  }
+  p.x += p.vx * dt; p.y += dive ? p.vy * dt : 0;
+  if (dive) {
+    p.x = clamp(p.x, state.gate ? ARENA_L + 14 : 30, LVLEN - 30);
+    p.y = clamp(p.y, TOPY, FLOOR - 34);
+  } else { p.x = clamp(p.x, 70, W - 70); p.y = TAV.y; }
+  if (p.hp > maxHP()) p.hp = maxHP();
+}
+function meleeHit(kind) {
+  const p = state.p, heavy = kind === 'heavy', range = heavy ? tune.heavy_range : tune.light_range;
+  const bx = p.x + p.face * (range / 2 + 6), bhw = range / 2 + 10, by = p.y, bhh = 46;
+  const base = (heavy ? tune.heavy_dmg : tune.light_dmg) * dmgMul();
+  for (const m of state.mobs) {
+    if (m.dead || m.hidden || p.hitSet.has(m)) continue;
+    if (hit2(bx, by, bhw, bhh, m.x, m.y, m.hw, m.hh)) { p.hitSet.add(m); hurtMob(m, base, { kind, stag: heavy }); state.hs = 0.05; }
+  }
+  for (const f of state.fish) {
+    if (f.dead || p.hitSet.has(f)) continue;
+    if (hit2(bx, by, bhw, bhh, f.x, f.y, 16, 10)) { p.hitSet.add(f); killFish(f); }
+  }
+  const b = state.boss;
+  if (b && !p.hitSet.has(b)) {
+    for (const hb of bossBoxes(b)) {
+      if (hit2(bx, by, bhw, bhh, hb.x, hb.y, hb.hw, hb.hh)) { p.hitSet.add(b); hurtBoss(b, base * hb.mul, { heavy }); state.hs = heavy ? 0.09 : 0.05; break; }
+    }
+  }
+}
+function fireHarpoon() {
+  const p = state.p, f = p.face, range = tune.harpoon_range;
+  let best = null, bd = 1e9, kind = null;
+  for (const m of state.mobs) {
+    if (m.dead || m.hidden) continue;
+    const dx = (m.x - p.x) * f;
+    if (dx > 0 && dx < range + m.hw && Math.abs(m.y - p.y) < m.hh + 22 && dx < bd) { best = m; bd = dx; kind = 'mob'; }
+  }
+  for (const fi of state.fish) {
+    if (fi.dead) continue;
+    const dx = (fi.x - p.x) * f;
+    if (dx > 0 && dx < range && Math.abs(fi.y - p.y) < 30 && dx < bd) { best = fi; bd = dx; kind = 'fish'; }
+  }
+  const b = state.boss;
+  if (b && !b.dead) for (const hb of bossBoxes(b)) {
+    const dx = (hb.x - p.x) * f - hb.hw;
+    if (dx < range && dx > -hb.hw * 2 && Math.abs(hb.y - p.y) < hb.hh + 22 && Math.max(0, dx) < bd) { best = b; bd = Math.max(0, dx); kind = 'boss'; }
+  }
+  state.line = { x0: p.x, y0: p.y, x1: p.x + f * (best ? bd + (kind === 'fish' ? 0 : 10) : range), y1: p.y, t: 0.28, ok: !!best };
+  tone(320, 0.12, 'triangle', 0.14, 260);
+  if (kind === 'mob') {
+    if (best.hp / best.maxhp < tune.reel_hp) killMob(best, true);
+    else hurtMob(best, tune.harpoon_dmg * dmgMul(), { kind: 'spear', spear: true });
+  } else if (kind === 'fish') killFish(best);
+  else if (kind === 'boss') hurtBoss(best, tune.harpoon_dmg * dmgMul() * 0.8, { mul: 1 });
+}
+function killFish(f) {
+  f.dead = true; burst(f.x, f.y, 6, '#bfe', 90, 0.4);
+  if (rng() < tune.fish_chance) { const r = rng(); giveItem(r < 0.6 ? 'silverfin' : r < 0.88 ? 'glowfin' : 'squid'); }
+}
+function die() {
+  const p = state.p, S = state.S;
+  if (scene === 'over') return;
+  if (state.mode !== 'dive') { p.hp = 1; return; }
+  state.lostOld = !!S.stain && (S.stain.souls > 0 || Object.keys(S.stain.bag).length > 0);
+  S.stain = { depth: state.depth, x: p.x, y: clamp(p.y, TOPY, FLOOR - 34), souls: S.souls, bag: Object.assign({}, S.bag) };
+  S.souls = 0; S.bag = {}; S.dish = null;
+  state.deathT = 0; scene = 'over'; state.menu = null;
+  tone(90, 1.4, 'sawtooth', 0.3, -50);
+}
+function respawn() {
+  const p = state.p;
+  enterTavern(true);
+  p.hp = maxHP(); p.stam = maxStam(); p.flasks = maxFlasks(); p.inv = 0; p.stun = 0; p.flash = 0;
+  scene = 'play';
+  toast(state.lostOld ? 'The sea swallowed what you lost before. Your newest loss waits where you fell.' : 'You wake at the hearth. What you lost waits where you fell.', 5);
+  state.lostOld = false;
+}
+function hurtPlayer(dmg, sx, o = {}) {
+  const p = state.p;
+  if (p.hp <= 0 || scene === 'over') return false;
+  if (p.act === 'roll' && p.at < tune.roll_iframes + (dishFx().iframe || 0) && !o.force) return false;
+  if (p.inv > 0 && !o.force) return false;
+  dmg *= 1 - (dishFx().def || 0);
+  const dir = sgn(p.x - sx);
+  if (p.guard && sgn(sx - p.x) === p.face && !o.pierce) {
+    const cost = dmg * tune.guard_stam;
+    if (p.stam >= cost) {
+      p.stam -= cost; p.regen = tune.stam_delay + 0.3; p.hp -= dmg * (1 - tune.guard_cut); p.vx += dir * 200; p.inv = 0.18;
+      fxText(p.x, p.y - 52, 'blocked', '#cfe', 18); burst(p.x + p.face * 22, p.y, 8, '#ffe9a8', 200, 0.3, true); tone(500, 0.08, 'square', 0.15);
+      if (p.hp <= 0) die();
+      return true;
+    }
+    p.stam = 0; p.stun = 0.8; p.act = null; fxText(p.x, p.y - 52, 'guard broken', '#ff8a7a', 20);
+  }
+  p.hp -= dmg; p.flash = 0.15; p.inv = tune.hit_invuln; p.stun = Math.max(p.stun, dmg >= 25 ? 0.42 : 0.24);
+  if (p.act && p.act !== 'roll') p.act = null; else if (p.act === 'roll') p.act = null;
+  p.vx = dir * 260; p.vy = -40; state.hs = 0.06; state.shake = 8;
+  burst(p.x, p.y, 10, '#ff5a5a', 180, 0.5); fxText(p.x, p.y - 40, String(Math.round(dmg)), '#ff8a8a', 22); tone(110, 0.2, 'square', 0.22, -40);
+  if (p.hp <= 0) die();
+  return true;
+}
+
+// ---- Minions -------------------------------------------------------------------------
+function mkMob(k, x, y, o = {}) {
+  const d = state.depth, hpM = 1 + tune.depth_hp * (d - 1), dmM = 1 + tune.depth_dmg * (d - 1), spM = 1 + tune.depth_speed * (d - 1);
+  const B = { angler: [tune.angler_hp, 30, 22], jelly: [tune.jelly_hp, 24, 26], crab: [tune.crab_hp, 34, 24], eel: [tune.eel_hp, 36, 18] }[k];
+  const el = !!o.elite, hp = B[0] * hpM * (el ? tune.elite_hp : 1);
+  return { k, x, y, ox: x, oy: y, hp, maxhp: hp, hw: B[1] * (el ? 1.25 : 1), hh: B[2] * (el ? 1.25 : 1), dm: dmM * (el ? tune.elite_dmg : 1), sp: spM,
+    face: -1, st: 'idle', tm: 0, cd: 1 + rng() * 1.2, ph: rng() * 6, flash: 0, elite: el, dead: false, hidden: k === 'eel', chain: 0, aim: 0,
+    touch: 0, trail: [], stun: 0, summon: !!o.summon };
+}
+function hurtMob(m, dmg, o) {
+  if (m.dead) return;
+  let d = dmg;
+  if (m.k === 'crab' && m.st !== 'rec') d *= o.kind === 'heavy' ? 0.85 : o.spear ? 0.3 : 0.4;
+  m.hp -= d; m.flash = 0.12; const p = state.p;
+  m.x += sgn(m.x - p.x) * (o.stag ? 26 : 10); if (m.k === 'angler' || m.k === 'jelly') m.y += (rng() - 0.5) * 10;
+  fxText(m.x, m.y - m.hh - 8, String(Math.round(d)), m.k === 'crab' && d < dmg * 0.5 ? '#9aa' : '#fff', 20);
+  burst(m.x, m.y, 6, m.k === 'jelly' ? '#e0a0ff' : '#ffb0a0', 140, 0.4);
+  tone(o.spear ? 260 : 140, 0.1, 'square', 0.2);
+  if (o.stag && (m.st === 'wind' || m.st === 'charge' || m.st === 'lunge' || m.st === 'tele')) { m.st = m.k === 'jelly' ? 'idle' : 'rec'; m.tm = 0.8; m.cd = 1; m.stun = 0.3; }
+  if (m.hp <= 0) killMob(m, false);
+}
+function killMob(m, reel) {
+  if (m.dead) return;
+  m.dead = true; burst(m.x, m.y, 18, m.k === 'jelly' ? '#e0a0ff' : '#ff9a7a', 220, 0.8, m.k === 'jelly');
+  tone(200, 0.3, 'sawtooth', 0.2, -120);
+  if (m.summon) return;
+  giveSouls(Math.round(tune.soul_per_mob * (1 + 0.25 * (state.depth - 1)) * (m.elite ? 3 : 1)));
+  let got = 0;
+  for (const [id, pr] of DROPS[m.k]) { if (rng() < pr) { giveItem(id); got++; break; } }
+  if (reel) { fxText(m.x, m.y - 40, 'reeled in', '#9ff0e0', 20); const e = DROPS[m.k][0][0]; giveItem(e); }
+  if (m.elite) giveItem(DROPS[m.k][0][0]);
+}
+function aiAngler(m, dt) {
+  const p = state.p, dx = p.x - m.x, dy = p.y - m.y, dist = hyp(dx, dy) || 1, wind = tune.angler_windup * (m.elite ? 0.85 : 1);
+  m.tm -= dt;
+  switch (m.st) {
+    case 'idle':
+      m.face = sgn(dx);
+      if (dist < 700) { const s = tune.angler_speed * m.sp * (dist > 280 ? 1 : 0.35); m.x += dx / dist * s * dt; m.y += dy / dist * s * 0.6 * dt; }
+      else m.y = m.oy + Math.sin(m.ph) * 20;
+      m.cd -= dt;
+      if (dist < 420 && m.cd <= 0) { m.st = 'wind'; m.tm = wind; m.chain = m.elite ? 2 : 1; m.aim = Math.atan2(dy, dx); }
+      break;
+    case 'wind':
+      if (m.tm > wind * 0.4) m.aim = Math.atan2(p.y - m.y, p.x - m.x);
+      m.face = Math.cos(m.aim) >= 0 ? 1 : -1;
+      if (m.tm <= 0) { m.st = 'lunge'; m.tm = 0.38; m.hitDone = false; tone(120, 0.25, 'sawtooth', 0.12, 200); }
+      break;
+    case 'lunge': {
+      const s = tune.angler_lunge * m.sp;
+      m.x += Math.cos(m.aim) * s * dt; m.y = clamp(m.y + Math.sin(m.aim) * s * dt, TOPY, FLOOR - 30);
+      if (!m.hitDone && hyp(p.x - m.x, p.y - m.y) < 46 && hurtPlayer(tune.angler_dmg * m.dm, m.x)) m.hitDone = true;
+      if (m.tm <= 0) { m.chain--; if (m.chain > 0) { m.st = 'pause'; m.tm = 0.26; } else { m.st = 'rec'; m.tm = tune.angler_recover * (m.elite ? 1.2 : 1); } }
+      break; }
+    case 'pause': if (m.tm <= 0) { m.st = 'wind'; m.tm = wind * 0.45; m.aim = Math.atan2(p.y - m.y, p.x - m.x); } break;
+    case 'rec': m.x += Math.cos(m.aim) * 60 * Math.max(0, m.tm) * dt; if (m.tm <= 0) { m.st = 'idle'; m.cd = 1.1 + rng(); } break;
+  }
+  if (state.gate) m.x = clamp(m.x, ARENA_L, ARENA_R);
+}
+function aiJelly(m, dt) {
+  const p = state.p, dx = p.x - m.x, ad = Math.abs(dx);
+  m.tm -= dt; m.touch -= dt;
+  if (m.st === 'idle') {
+    m.face = sgn(dx);
+    if (ad < 750 && ad > 140) m.x += sgn(dx) * 42 * m.sp * dt;
+    m.y = m.oy + Math.sin(m.ph * 1.3) * 40;
+    m.cd -= dt;
+    if (ad < 600 && m.cd <= 0) { m.st = 'charge'; m.tm = 0.7; }
+  } else if (m.st === 'charge' && m.tm <= 0) {
+    const a = Math.atan2(p.y - m.y, p.x - m.x);
+    for (const o of [-0.38, 0, 0.38]) state.proj.push({ k: 'spore', x: m.x, y: m.y, vx: Math.cos(a + o) * 150 * m.sp, vy: Math.sin(a + o) * 150 * m.sp, r: 11, dmg: tune.jelly_dmg * m.dm, life: 5 });
+    tone(520, 0.12, 'sine', 0.12, -200);
+    m.st = 'idle'; m.cd = tune.jelly_period * (m.elite ? 0.7 : 1) * (0.9 + rng() * 0.3);
+  } else if (m.st === 'rec' && m.tm <= 0) m.st = 'idle';
+  if (m.touch <= 0 && hyp(p.x - m.x, p.y - m.y) < 40 && hurtPlayer(tune.jelly_dmg * 0.7 * m.dm, m.x)) m.touch = 1;
+}
+function aiCrab(m, dt) {
+  const p = state.p, dx = p.x - m.x;
+  m.tm -= dt; m.y = FLOOR - 26;
+  switch (m.st) {
+    case 'idle':
+      m.face = sgn(dx); if (Math.abs(dx) > 105) m.x += sgn(dx) * 58 * m.sp * dt;
+      m.cd -= dt;
+      if (Math.abs(dx) < 140 && Math.abs(p.y - m.y) < 170 && m.cd <= 0) { m.st = 'wind'; m.tm = tune.crab_windup; }
+      break;
+    case 'wind': if (m.tm <= 0) { m.st = 'swing'; m.tm = 0.22; m.hitDone = false; tone(180, 0.1, 'square', 0.15, -70); } break;
+    case 'swing':
+      if (!m.hitDone && hit2(m.x + m.face * 70, m.y - 30, 70, 110, p.x, p.y, 16, 26) && hurtPlayer(tune.crab_dmg * m.dm, m.x)) m.hitDone = true;
+      if (m.tm <= 0) { m.st = 'rec'; m.tm = 1.0; }
+      break;
+    case 'rec': if (m.tm <= 0) { m.st = 'idle'; m.cd = 1 + rng(); } break;
+  }
+}
+function aiEel(m, dt) {
+  const p = state.p;
+  m.tm -= dt;
+  switch (m.st) {
+    case 'idle':
+      m.hidden = true; m.cd -= dt;
+      if (Math.abs(p.x - m.ox) < 560 && m.cd <= 0) {
+        m.st = 'tele'; m.tm = tune.eel_tele; m.ty = clamp(p.y, TOPY + 20, FLOOR - 40); m.dir = rng() < 0.5 ? 1 : -1;
+        m.sx = m.dir > 0 ? cam.x - 100 : cam.x + W + 100; m.ex = m.dir > 0 ? cam.x + W - 170 : cam.x + 170; m.x = m.sx; m.y = m.ty; m.trail = [];
+      }
+      break;
+    case 'tele': m.hidden = true; if (m.tm <= 0) { m.st = 'dash'; m.hidden = false; m.hitDone = false; tone(90, 0.4, 'sawtooth', 0.2, 100); } break;
+    case 'dash':
+      m.x += m.dir * tune.eel_speed * m.sp * dt; m.face = m.dir; trail(m);
+      if (!m.hitDone && hyp(p.x - m.x, p.y - m.y) < 40 && hurtPlayer(tune.eel_dmg * m.dm, m.x)) m.hitDone = true;
+      if ((m.x - m.ex) * m.dir >= 0) { m.st = 'rec'; m.tm = 1.3; }
+      break;
+    case 'rec': m.face = m.dir; trail(m); if (m.tm <= 0) m.st = 'leave'; break;
+    case 'leave':
+      m.x += m.dir * 300 * dt; trail(m);
+      if (m.x > cam.x + W + 140 || m.x < cam.x - 140) { m.st = 'idle'; m.hidden = true; m.cd = 2.2 + rng() * 1.2; m.x = m.ox; }
+      break;
+  }
+}
+function trail(m) { m.trail.unshift({ x: m.x, y: m.y }); if (m.trail.length > 16) m.trail.pop(); }
+function updMobs(dt) {
+  const p = state.p;
+  for (const m of state.mobs) {
+    if (m.dead) continue;
+    m.flash -= dt; m.ph += dt;
+    if (Math.abs(m.x - p.x) > 1100 && m.k !== 'eel') continue;
+    if (m.stun > 0) { m.stun -= dt; continue; }
+    ({ angler: aiAngler, jelly: aiJelly, crab: aiCrab, eel: aiEel })[m.k](m, dt);
+  }
+  state.mobs = state.mobs.filter(m => !m.dead);
+}
+function updProj(dt) {
+  const p = state.p;
+  for (const q of state.proj) {
+    q.life -= dt; q.x += q.vx * dt; q.y += q.vy * dt; if (q.g) q.vy += q.g * dt;
+    if (!q.hit && hit2(q.x, q.y, q.r, q.rh || q.r, p.x, p.y, 16, 26) && hurtPlayer(q.dmg, q.x)) { if (q.k === 'wave') q.hit = true; else q.life = 0; }
+    if (q.k !== 'wave' && q.y > FLOOR + 10) q.life = 0;
+  }
+  state.proj = state.proj.filter(q => q.life > 0);
+}
+function addHaz(x, y, hw, hh, tele, act, dmg, type) { state.haz.push({ x, y, hw, hh, tele, act, dmg, type, t: 0, hit: false, fired: false }); }
+function updHaz(dt) {
+  const p = state.p;
+  for (const h of state.haz) {
+    h.t += dt; const on = h.t >= h.tele && h.t < h.tele + h.act;
+    if (on && !h.hit && hit2(h.x, h.y, h.hw, h.hh, p.x, p.y, 16, 26) && hurtPlayer(h.dmg, h.x)) h.hit = true;
+    if (on && !h.fired) { h.fired = true; tone(130, 0.2, 'sawtooth', 0.14, -50); state.shake = Math.max(state.shake || 0, 5); }
+  }
+  state.haz = state.haz.filter(h => h.t < h.tele + h.act + 0.25);
+}
+
+// ---- Bosses --------------------------------------------------------------------------
+function mkBoss(d) {
+  const kd = ((d - 1) % 3) + 1, def = BOSSDEF[kd], loop = Math.floor((d - 1) / 3);
+  const hp = ({ knight: tune.knight_hp, maw: tune.maw_hp, levi: tune.levi_hp }[def.k]) * (1 + 0.45 * loop);
+  const b = { boss: true, k: def.k, name: def.name, hp, maxhp: hp, th: def.th, parts: def.parts, fin: def.fin, limps: 0, phase: 1, st: 'sleep',
+    tm: 0, tmax: 1, face: -1, flash: 0, dm: 1 + tune.boss_dmg_depth * (d - 1), t: 0, dead: false, atk: null, segs: [], bob: 0, ot: 0, mouth: 0, hitDone: false };
+  if (def.k === 'knight') { b.x = ARENA_L + 980; b.y = FLOOR; b.home = { x: b.x, y: FLOOR }; }
+  if (def.k === 'maw') { b.x = ARENA_R + 150; b.y = 330; b.home = { x: ARENA_R - 340, y: 330 }; for (let i = 0; i < 16; i++) b.segs.push({ x: b.x + i * 34, y: b.y }); }
+  if (def.k === 'levi') { b.x = ARENA_R + 260; b.y = 340; b.home = { x: ARENA_R - 250, y: 340 }; }
+  return b;
+}
+function bossBoxes(b) {
+  if (b.st === 'sleep' || b.st === 'intro' || b.st === 'dying' || b.dead) return [];
+  if (b.k === 'knight') return b.st === 'rest' ? [{ x: b.x, y: FLOOR - 62, hw: 50, hh: 62, mul: 1 }] : [{ x: b.x, y: FLOOR - 98, hw: 46, hh: 98, mul: 1 }];
+  if (b.k === 'maw') { const o = [{ x: b.x, y: b.y, hw: 48, hh: 40, mul: 1 }]; for (let i = 1; i < 5; i++) o.push({ x: b.segs[i].x, y: b.segs[i].y, hw: 30, hh: 30, mul: 0.5 }); return o; }
+  return [{ x: b.x - 20, y: b.y + b.bob, hw: 110, hh: 124, mul: 1 }];
+}
+function hurtBoss(b, dmg, o) {
+  if (b.dead || b.st === 'sleep' || b.st === 'intro' || b.st === 'dying') return;
+  const d = dmg * (b.st === 'rest' ? tune.rest_bonus : 1);
+  b.hp -= d; b.flash = 0.1;
+  fxText(b.x + rnd(-30, 30), b.y - (b.k === 'knight' ? 190 : 60), String(Math.round(d)), b.st === 'rest' ? '#ffd27a' : '#fff', b.st === 'rest' ? 26 : 22);
+  burst(b.k === 'knight' ? b.x : b.x - 20, b.k === 'knight' ? b.y - 100 : b.y, 6, '#ffd0b0', 160, 0.4);
+  tone(100, 0.12, 'square', 0.22);
+  if (b.hp <= 0) { bossDie(b); return; }
+  if (b.limps < b.th.length && b.hp / b.maxhp <= b.th[b.limps]) startLimp(b);
+}
+function startLimp(b) {
+  const p = state.p, part = b.parts[b.limps];
+  b.limps++; b.phase = b.limps + 1; b.st = 'flee'; b.tm = 3; b.atk = null; b.hitDone = true;
+  state.haz = []; state.proj = [];
+  const left = p.x > (ARENA_L + ARENA_R) / 2;
+  if (b.k === 'knight') b.rest = { x: left ? ARENA_L + 170 : ARENA_R - 150, y: FLOOR };
+  if (b.k === 'maw') b.rest = { x: left ? ARENA_L + 170 : ARENA_R - 170, y: FLOOR - 70 };
+  if (b.k === 'levi') b.rest = { x: ARENA_R - 170, y: 490 };
+  state.picks.push({ x: b.x, y: clamp(b.y - 40, TOPY, FLOOR - 30), id: part, t: 0 });
+  banner('IT LIMPS', 'a part breaks loose - take it before it recovers', 2.6);
+  tone(70, 0.8, 'sawtooth', 0.3, -30); state.shake = 14; state.hs = 0.15;
+}
+function bossDie(b) {
+  b.st = 'dying'; b.tm = 2.6; state.haz = []; state.proj = []; state.hs = 0.3; state.shake = 18;
+  for (const m of state.mobs) if (m.summon) m.dead = true;
+  giveSouls(Math.round(tune.boss_souls * (1 + 0.25 * (state.depth - 1))));
+  state.picks.push({ x: b.x, y: clamp(b.y - 40, TOPY, FLOOR - 30), id: b.fin, t: 0 });
+  tone(60, 1.6, 'sawtooth', 0.35, -20);
+}
+function finishBoss(b) {
+  const S = state.S, d = state.depth;
+  b.dead = true; state.boss = null; state.gate = false; state.haz = []; state.proj = [];
+  S.cleared[d] = true; S.beaten++;
+  if (d < 3) S.maxDepth = Math.max(S.maxDepth, d + 1);
+  state.exit = { x: ARENA_R - 90 };
+  if (d === 3 && !S.endless) { state.victoryT = 2.4; banner('THE DEEP IS QUIET', 'The Crowned Leviathan is felled', 4); }
+  else banner('DEPTH CLEARED', depthName(d), 3.5);
+  if (d >= 4) S.endlessDepth = Math.max(S.endlessDepth, d + 1);
+}
+function bossCommon(b, dt) {
+  if (b.st === 'sleep') return true;
+  if (b.st === 'intro') {
+    b.tm -= dt; const k = Math.min(1, dt * 1.6); b.x += (b.home.x - b.x) * k; b.y += (b.home.y - b.y) * k;
+    if (b.tm <= 0) { b.st = 'idle'; b.tm = 0.9; } return true;
+  }
+  if (b.st === 'flee') {
+    const t = b.rest; b.x += clamp(t.x - b.x, -240 * dt, 240 * dt); b.y += clamp(t.y - b.y, -240 * dt, 240 * dt); b.tm -= dt;
+    if (b.tm <= 0 || (Math.abs(t.x - b.x) < 6 && Math.abs(t.y - b.y) < 6)) { b.st = 'rest'; b.tm = tune.rest_time; fxText(b.x, b.y - 120, 'resting: strike now', '#ffd27a', 22); }
+    return true;
+  }
+  if (b.st === 'rest') {
+    b.tm -= dt; const cap = b.th[b.limps - 1] * b.maxhp; b.hp = Math.min(cap, b.hp + b.maxhp * tune.rest_regen * dt);
+    if (b.tm <= 0) { b.st = 'idle'; b.tm = 0.8; fxText(b.x, b.y - 120, 'it rises', '#ff9a7a', 22); }
+    return true;
+  }
+  if (b.st === 'dying') {
+    b.tm -= dt; if (rng() < 0.5) burst(b.x + rnd(-80, 80), b.y + rnd(-120, 0), 3, '#ffd27a', 220, 0.8, true);
+    if (b.tm <= 0) finishBoss(b); return true;
+  }
+  return false;
+}
+function updBoss(dt) {
+  const b = state.boss; if (!b) return;
+  b.flash -= dt; b.t += dt;
+  if (b.k === 'knight') updKnight(b, dt); else if (b.k === 'maw') updMaw(b, dt); else updLevi(b, dt);
+}
+
+// The Drowned Knight: walks the floor, every swing is a wind-up you can read
+const KATK = { slam: { w: 0.95, a: 0.2, r: 1.1 }, sweep: { w: 0.7, a: 0.24, r: 0.8 }, thrust: { w: 0.5, a: 0.32, r: 1.0 }, throw: { w: 0.6, a: 0.06, r: 0.85 } };
+function chooseKnight(b) {
+  const p = state.p, dx = p.x - b.x, ad = Math.abs(dx), high = p.y < FLOOR - 240, ph = b.phase;
+  let a;
+  if (ad > 520 || (high && rng() < 0.7)) a = 'throw';
+  else if (ad < 190) { const o = ['slam', 'slam', 'sweep', 'sweep']; if (ph >= 2) o.push('thrust', 'slam'); a = pick(o); }
+  else if (ph >= 2) a = rng() < 0.6 ? 'thrust' : 'throw';
+  else { b.tm = 0.25; return; }
+  const w = KATK[a].w * (ph >= 2 ? 0.85 : 1) + (a === 'thrust' && ph >= 2 ? rnd(0, 0.35) : 0);
+  b.atk = a; b.st = 'wind'; b.tm = w; b.tmax = w; b.face = sgn(dx); b.hitDone = false;
+}
+function updKnight(b, dt) {
+  if (bossCommon(b, dt)) return;
+  const p = state.p, dx = p.x - b.x, ph = b.phase, ts = ph >= 2 ? 0.85 : 1, walk = tune.knight_speed * (b.limps ? tune.limp_speed : 1);
+  b.y = FLOOR;
+  if (b.st === 'idle') {
+    b.face = sgn(dx); if (Math.abs(dx) > 150) b.x += sgn(dx) * walk * dt;
+    b.tm -= dt; if (b.tm <= 0) chooseKnight(b);
+  } else {
+    const a = KATK[b.atk]; b.tm -= dt;
+    if (b.st === 'wind' && b.tm <= 0) {
+      b.st = 'act'; b.tm = a.a * ts; b.hitDone = false;
+      if (b.atk === 'slam') {
+        tone(60, 0.4, 'sawtooth', 0.3, -20); state.shake = 10;
+        if (ph >= 2) for (const s of [-1, 1]) state.proj.push({ k: 'wave', x: b.x + s * 80, y: FLOOR - 26, vx: s * 380, vy: 0, r: 30, rh: 26, dmg: 16 * b.dm, life: 2.4 });
+      }
+      if (b.atk === 'throw') state.proj.push({ k: 'anchor', x: b.x + b.face * 50, y: FLOOR - 140, vx: Math.cos(Math.atan2(p.y - (FLOOR - 140), p.x - b.x)) * 470, vy: Math.sin(Math.atan2(p.y - (FLOOR - 140), p.x - b.x)) * 470, r: 16, dmg: 16 * b.dm, life: 3 });
+    } else if (b.st === 'act') {
+      if (b.atk === 'slam' && !b.hitDone && hit2(b.x + b.face * 85, FLOOR - 130, 85, 135, p.x, p.y, 16, 26) && hurtPlayer(30 * b.dm, b.x)) b.hitDone = true;
+      if (b.atk === 'sweep' && !b.hitDone && hit2(b.x + b.face * 95, FLOOR - 80, 100, 90, p.x, p.y, 16, 26) && hurtPlayer(24 * b.dm, b.x)) b.hitDone = true;
+      if (b.atk === 'thrust') {
+        b.x = clamp(b.x + b.face * 720 * dt, ARENA_L + 60, ARENA_R - 60);
+        if (!b.hitDone && hit2(b.x + b.face * 60, FLOOR - 90, 70, 90, p.x, p.y, 16, 26) && hurtPlayer(26 * b.dm, b.x)) b.hitDone = true;
+      }
+      if (b.tm <= 0) { b.st = 'rec'; b.tm = a.r * ts; }
+    } else if (b.st === 'rec' && b.tm <= 0) { b.st = 'idle'; b.tm = rnd(0.2, 0.5); }
+  }
+  b.x = clamp(b.x, ARENA_L + 50, ARENA_R - 50);
+}
+
+// Maw of the Reef: a great moray that charges, bites up from the floor, spits ink, then coils
+function followChain(b) {
+  const s = b.segs; s[0].x = b.x; s[0].y = b.y;
+  for (let i = 1; i < s.length; i++) {
+    const a = s[i - 1], c = s[i], dx = a.x - c.x, dy = a.y - c.y, d = hyp(dx, dy) || 1;
+    if (d > 34) { c.x = a.x - dx / d * 34; c.y = a.y - dy / d * 34; }
+  }
+}
+function steer(b, tx, ty, sp, dt) { const dx = tx - b.x, dy = ty - b.y, d = hyp(dx, dy) || 1, s = Math.min(sp * dt, d); b.x += dx / d * s; b.y += dy / d * s; b.face = dx >= 0 ? 1 : -1; }
+function headHit(b, r, dmg) { const p = state.p; if (hyp(p.x - b.x, p.y - b.y) < r + 16 && hurtPlayer(dmg * b.dm, b.x)) return true; return false; }
+function bodyHit(b, dmg) {
+  const p = state.p;
+  for (let i = 2; i < 10; i++) { const s = b.segs[i]; if (hyp(p.x - s.x, p.y - s.y) < 34 - i * 1.5 + 14) { if (hurtPlayer(dmg * b.dm, s.x)) return; } }
+}
+function chooseMaw(b) {
+  const p = state.p, o = ['charge', 'charge', 'floor']; if (b.phase >= 2) o.push('ink', 'floor'); if (b.phase >= 3) o.push('coil', 'charge');
+  const a = pick(o); b.atk = a; b.shots = 0;
+  if (a === 'charge') { b.st = 'ctele'; b.tm = 0.9; b.aim = Math.atan2(p.y - b.y, p.x - b.x); }
+  if (a === 'floor') {
+    b.st = 'ftele'; b.tm = 0.9; b.bx = clamp(p.x, ARENA_L + 120, ARENA_R - 120);
+    addHaz(b.bx, FLOOR - 150, 55, 170, 0.9, 0.35, 28 * b.dm, 'bite');
+  }
+  if (a === 'ink') { b.st = 'ink'; b.tm = 1.8; }
+  if (a === 'coil') { b.st = 'coil'; b.tm = 3.6; b.dir = p.x > (ARENA_L + ARENA_R) / 2 ? -1 : 1; b.x = b.dir > 0 ? ARENA_L + 30 : ARENA_R - 30; b.ty = rnd(220, 420); }
+}
+function updMaw(b, dt) {
+  const p = state.p, ls = b.limps ? tune.limp_speed : 1;
+  followChain(b);
+  if (bossCommon(b, dt)) { if (b.st === 'sleep') return; b.face = sgn(p.x - b.x) || -1; return; }
+  switch (b.st) {
+    case 'idle': {
+      b.ot += dt; steer(b, (ARENA_L + ARENA_R) / 2 + Math.cos(b.ot * 0.55) * 480, 320 + Math.sin(b.ot * 0.9) * 130, 230 * ls, dt);
+      b.tm -= dt; if (b.tm <= 0) chooseMaw(b); break; }
+    case 'ctele':
+      b.tm -= dt; if (b.tm > 0.3) b.aim = Math.atan2(p.y - b.y, p.x - b.x);
+      b.face = Math.cos(b.aim) >= 0 ? 1 : -1; b.x += (rng() - 0.5) * 3;
+      if (b.tm <= 0) { b.st = 'charge'; b.tm = 0.85; tone(70, 0.5, 'sawtooth', 0.25, -20); }
+      break;
+    case 'charge':
+      b.x = clamp(b.x + Math.cos(b.aim) * 820 * ls * dt, ARENA_L + 40, ARENA_R - 20); b.y = clamp(b.y + Math.sin(b.aim) * 820 * ls * dt, TOPY + 30, FLOOR - 40);
+      b.face = Math.cos(b.aim) >= 0 ? 1 : -1;
+      headHit(b, 44, 30); bodyHit(b, 12);
+      b.tm -= dt; if (b.tm <= 0) { b.st = 'rec'; b.tm = 1.1; }
+      break;
+    case 'rec': b.tm -= dt; steer(b, b.x + Math.cos(b.aim) * 30, b.y + Math.sin(b.aim) * 30, 60, dt); if (b.tm <= 0) { b.st = 'idle'; b.tm = rnd(0.5, 1); } break;
+    case 'ftele':
+      b.tm -= dt; b.x += clamp(b.bx - b.x, -700 * dt, 700 * dt); b.y += clamp(FLOOR + 110 - b.y, -500 * dt, 500 * dt);
+      if (b.tm <= 0) { b.st = 'fact'; b.tm = 0.35; tone(80, 0.3, 'sawtooth', 0.25, 60); }
+      break;
+    case 'fact': {
+      b.tm -= dt; const k = 1 - Math.max(0, b.tm) / 0.35; b.x = b.bx; b.y = lerp(FLOOR + 90, FLOOR - 250, Math.sin(k * Math.PI));
+      if (b.tm <= 0) { b.st = 'frec'; b.tm = 1.1; } break; }
+    case 'frec': b.tm -= dt; b.y += clamp(FLOOR - 120 - b.y, -200 * dt, 200 * dt); if (b.tm <= 0) { b.st = 'idle'; b.tm = rnd(0.5, 1); } break;
+    case 'ink': {
+      b.tm -= dt; steer(b, ARENA_R - 380, 240, 260, dt);
+      const fire = (b.shots === 0 && b.tm < 1.1) || (b.shots === 1 && b.phase >= 3 && b.tm < 0.5);
+      if (fire) {
+        b.shots++; const a = Math.atan2(p.y - b.y, p.x - b.x) - 0.1;
+        for (const o of [-0.3, 0, 0.3]) state.proj.push({ k: 'ink', x: b.x, y: b.y, vx: Math.cos(a + o) * 300, vy: Math.sin(a + o) * 300 - 60, g: 120, r: 16, dmg: 13 * b.dm, life: 4 });
+        tone(200, 0.25, 'sine', 0.2, -120);
+      }
+      if (b.tm <= 0) { b.st = 'idle'; b.tm = rnd(0.5, 1); } break; }
+    case 'coil':
+      b.tm -= dt; b.x += b.dir * 300 * dt; b.y = b.ty + Math.sin(b.tm * 4) * 120; b.face = b.dir;
+      headHit(b, 44, 24); bodyHit(b, 14);
+      if (b.tm <= 0 || b.x < ARENA_L + 20 || b.x > ARENA_R - 20) { b.st = 'idle'; b.tm = rnd(0.6, 1.1); }
+      break;
+  }
+}
+
+// The Crowned Leviathan: stays at the far end; its face must be reached through what it throws
+function chooseLevi(b) {
+  const p = state.p, ph = b.phase, near = p.x > b.x - 340, o = ['columns', 'wave'];
+  if (ph >= 2) o.push('jellies', 'bite', 'columns'); if (ph >= 3) o.push('pull'); if (ph >= 4) o.push('spikes', 'wave');
+  let a = pick(o); if (near && ph >= 2 && rng() < 0.55) a = 'bite';
+  if (a === 'jellies' && state.mobs.filter(m => m.summon && !m.dead).length >= 2) a = 'columns';
+  b.atk = a; b.st = a; b.tm = 2;
+  const mid = (ARENA_L + ARENA_R) / 2;
+  if (a === 'columns') {
+    b.tm = 2.1;
+    for (const [tele, offs] of [[1.0, [-170, 0, 170]], [1.6, [-90, 90, 250]]]) for (const o2 of offs) addHaz(clamp(p.x + o2, ARENA_L + 60, ARENA_R - 60), FLOOR - 210, 46, 214, tele, 0.35, 28 * b.dm, 'col');
+  }
+  if (a === 'wave') { b.tm = 2.0; const hi = rng() < 0.5; addHaz(mid, hi ? 200 : 560, 700, 85, 1.15, 0.55, 24 * b.dm, 'band'); if (ph >= 4) addHaz(mid, hi ? 560 : 200, 700, 85, 1.9, 0.5, 24 * b.dm, 'band'); }
+  if (a === 'bite') { b.tm = 2.3; b.mouth = 1; addHaz(b.x - 200, b.y + 50, 140, 120, 0.8, 0.3, 40 * b.dm, 'bite'); }
+  if (a === 'jellies') { b.tm = 1.4; for (const dy of [-110, 90]) state.mobs.push(mkMob('jelly', b.x - 250, b.y + dy, { summon: true })); }
+  if (a === 'pull') { b.tm = 3.4; }
+  if (a === 'spikes') { b.tm = 2.6; for (let i = 0; i < 6; i++) addHaz(ARENA_L + 120 + (i + rng() * 0.6) * ((ARENA_R - ARENA_L - 240) / 6), 170, 38, 180, 0.9 + i * 0.22, 0.3, 24 * b.dm, 'spike'); }
+}
+function updLevi(b, dt) {
+  const p = state.p;
+  b.bob = Math.sin(b.t * 1.4) * 8;
+  if (bossCommon(b, dt)) return;
+  b.face = -1; b.mouth = Math.max(0, b.mouth - dt * 0.9);
+  if (b.st === 'idle') { b.tm -= dt; if (b.tm <= 0) chooseLevi(b); return; }
+  b.tm -= dt;
+  if (b.st === 'pull') {
+    if (p.act !== 'roll') p.x += 160 * dt;
+    b.mouth = 0.5; b.shots = (b.shots || 0) + dt;
+    if (b.shots > 0.55) { b.shots = 0; const a = Math.atan2(p.y - b.y, p.x - (b.x - 100)); state.proj.push({ k: 'bubble', x: b.x - 110, y: b.y + 20, vx: Math.cos(a) * 210, vy: Math.sin(a) * 210, r: 18, dmg: 10 * b.dm, life: 4 }); }
+    if (b.tm <= 0) { b.st = 'bite'; b.tm = 2.0; b.mouth = 1; addHaz(b.x - 200, b.y + 50, 140, 120, 0.7, 0.3, 40 * b.dm, 'bite'); }
+    return;
+  }
+  if (b.tm <= 0) { b.st = 'idle'; b.tm = rnd(0.5, 1.0) * (b.phase >= 3 ? 0.7 : 1); }
+}
+
+// ---- Menus ---------------------------------------------------------------------------
+function openMenu(title, build, sub) { state.menu = { title, build, items: build(), idx: 0, sub: sub || '' }; tone(440, 0.06, 'triangle', 0.1); }
+function closeMenu() { state.menu = null; }
+function updMenu() {
+  const m = state.menu;
+  if (tapped('ArrowUp', 'KeyW')) m.idx = (m.idx + m.items.length - 1) % m.items.length;
+  if (tapped('ArrowDown', 'KeyS')) m.idx = (m.idx + 1) % m.items.length;
+  if (tapped('Escape', 'KeyQ', 'Backspace')) { closeMenu(); return; }
+  if (tapped('Enter', 'KeyE', 'Space')) {
+    const it = m.items[m.idx];
+    if (!it || it.disabled) { tone(120, 0.1, 'square', 0.12); return; }
+    it.run && it.run();
+    if (it.close) { if (state.menu === m) closeMenu(); } else if (state.menu === m) { m.items = m.build(); m.idx = clamp(m.idx, 0, m.items.length - 1); }
+  }
+}
+function setDish(id) {
+  const S = state.S, p = state.p, before = maxHP();
+  S.dish = id; S.cooked++; p.hp = Math.min(maxHP(), p.hp + Math.max(0, maxHP() - before));
+}
+function menuHearth() {
+  openMenu('The Hearth', () => [
+    { label: 'Rest by the fire', detail: 'Heal, refill your flasks and save. Everything out in the sea stirs again.', run() { restAll(); toast('Rested. Flasks refilled, game saved.'); tone(330, 0.4, 'sine', 0.12, 120); }, close: true },
+    { label: 'Leave the fire', close: true },
+  ], 'Level ' + state.S.lvl + '   Souls ' + state.S.souls);
+}
+function menuShrine() {
+  openMenu('The Lantern Shrine', () => {
+    const S = state.S, c = levelCost(), can = S.souls >= c;
+    const row = (k, t, d) => ({ label: `${t}   (${c} souls)`, detail: d, disabled: !can, run() { S.souls -= c; S[k]++; S.lvl++; state.p.hp = Math.min(maxHP(), state.p.hp + 10); tone(520, 0.3, 'triangle', 0.15, 300); toast('Level ' + S.lvl); } });
+    return [row('vig', 'Vigor: +10 health', 'More health to spend.'), row('end', 'Endurance: +8 stamina', 'More swings and rolls before you tire.'), row('str', 'Strength: +8% damage', 'Every blow hits harder.'), { label: 'Leave the shrine', close: true }];
+  }, 'Souls: ' + state.S.souls);
+}
+function menuCounter() {
+  openMenu('The Counter', () => {
+    const S = state.S, items = [], ids = Object.keys(S.bag).filter(id => S.bag[id] > 0);
+    const total = ids.reduce((a, id) => a + sellPrice(id) * S.bag[id], 0);
+    const sell = (id, n) => { const g = sellPrice(id) * n; S.gold += g; S.sold += g; S.bag[id] -= n; if (S.bag[id] <= 0) delete S.bag[id]; tone(700, 0.12, 'triangle', 0.16); };
+    items.push({ label: `Sell everything   (+${total} gold)`, disabled: total === 0, detail: 'Renown grows with every coin: more patrons, better prices.', run() { ids.forEach(id => sell(id, S.bag[id])); toast('Sold. The tavern buzzes.'); } });
+    ids.forEach(id => items.push({ label: `Sell ${ITEMS[id].n} x${S.bag[id]}   (+${sellPrice(id) * S.bag[id]})`, run() { sell(id, S.bag[id]); } }));
+    const up = (k, t, base, max, d, fn) => { const n = S[k], c = base * (n + 1); items.push({ label: n >= max ? `${t}   (sold out)` : `${t}   (${c} gold)`, detail: d, disabled: n >= max || S.gold < c, run() { S.gold -= c; S[k]++; fn && fn(); tone(520, 0.2, 'triangle', 0.15, 200); } }); };
+    up('tank', 'Bigger air tank: +25s of air', 40, 4, 'Stay down longer before the sea chokes you.');
+    up('flaskUp', 'An extra flask', 70, 3, 'One more flask to drink on a dive.');
+    up('bagUp', 'A bigger catch bag: +2', 50, 3, 'Carry more of the catch home.');
+    items.push({ label: 'Leave the counter', close: true });
+    return items;
+  }, 'Gold ' + state.S.gold + '   Renown ' + renown());
+}
+function menuCauldron() {
+  openMenu('The Cauldron', () => {
+    const S = state.S, ids = Object.keys(S.bag).filter(id => S.bag[id] > 0 && ITEMS[id].dish);
+    const items = ids.map(id => ({ label: `Cook ${ITEMS[id].dish}   (${ITEMS[id].desc})`, detail: 'Replaces the dish you carry. It lasts until you die.', run() { S.bag[id]--; if (S.bag[id] <= 0) delete S.bag[id]; setDish(id); toast('You eat ' + ITEMS[id].dish + '.'); tone(300, 0.3, 'sine', 0.15, 200); } }));
+    if (!items.length) items.push({ label: 'Nothing in your bag can be cooked', disabled: true, detail: 'Fish, lamps, bells, claws and fangs make dishes.' });
+    items.push({ label: 'Leave the cauldron', close: true });
+    return items;
+  }, 'Dish: ' + (state.S.dish ? ITEMS[state.S.dish].dish : 'none'));
+}
+function menuAnvil() {
+  openMenu('The Anvil', () => {
+    const S = state.S, l = S.wlvl, items = [];
+    if (l >= 5) items.push({ label: 'Your blade cannot be sharpened further', disabled: true });
+    else {
+      const cost = WEAPON_COST[l], need = WEAPON_NEEDS[l];
+      items.push({ label: `Sharpen blade: level ${l} to ${l + 1}   (${cost} gold${need ? ' + ' + ITEMS[need].n : ''})`, detail: '+15% damage per level.',
+        disabled: S.gold < cost || (need && !S.bag[need]), run() { S.gold -= cost; if (need) { S.bag[need]--; if (S.bag[need] <= 0) delete S.bag[need]; } S.wlvl++; tone(220, 0.4, 'sawtooth', 0.15, 300); toast('The blade rings: level ' + S.wlvl); } });
+    }
+    items.push({ label: 'Leave the anvil', close: true });
+    return items;
+  }, 'Gold ' + state.S.gold + '   Blade level ' + state.S.wlvl);
+}
+function menuDoor() {
+  openMenu('The Dive Door', () => {
+    const S = state.S, items = [];
+    for (let d = 1; d <= Math.min(3, S.maxDepth); d++) items.push({ label: `Depth ${d}: ${DEPTHS[d]}${S.cleared[d] ? '   [cleared]' : ''}`, detail: state.p.hp < maxHP() ? 'You are hurt. Rest at the hearth first?' : 'Climb down. Every minion and the boss wait below.', close: true, run() { startDive(d); } });
+    if (S.endless) items.push({ label: `Endless descent: floor ${S.endlessDepth - 3}`, detail: 'Deeper than the Trench: tougher minions, bosses return stronger.', close: true, run() { startDive(S.endlessDepth); } });
+    items.push({ label: 'Stay in the tavern', close: true });
+    return items;
+  }, 'Air: ' + Math.round(maxO2()) + 's');
+}
+function menuExit() {
+  openMenu('The Way Down', () => [
+    { label: 'Descend deeper', detail: 'Keep your health and your air. The next floor is harder.', close: true, run() { startDive(state.depth + 1, true); } },
+    { label: 'Climb back to the tavern', close: true, run() { enterTavern(false); } },
+    { label: 'Stay', close: true },
+  ], 'Floor cleared');
+}
+
+// ---- The world each step ---------------------------------------------------------------
+function updTavern(dt) {
+  const st = state, p = st.p;
+  updPlayer(dt);
+  const stations = [
+    { x: TAV.hearth, label: 'E: rest by the hearth', fn: menuHearth }, { x: TAV.shrine, label: 'E: lantern shrine (spend souls)', fn: menuShrine },
+    { x: TAV.cauldron, label: 'E: cauldron (cook the catch)', fn: menuCauldron }, { x: TAV.counter, label: 'E: counter (sell and buy)', fn: menuCounter },
+    { x: TAV.anvil, label: 'E: anvil (sharpen your blade)', fn: menuAnvil }, { x: TAV.door, label: 'E: the dive door', fn: menuDoor },
+  ];
+  st.near = null;
+  for (const s of stations) if (Math.abs(p.x - s.x) < 70) st.near = s;
+  if (st.near && tapped('KeyE')) st.near.fn();
+  if (rng() < dt * 6) st.fx.push({ type: 'p', x: TAV.hearth + rnd(-30, 30), y: TAV.y - 90, vx: rnd(-10, 10), vy: -rnd(40, 90), c: '#ffb050', t: 0, life: 0.9, sz: 3, add: true });
+  if (rng() < dt * 3) st.fx.push({ type: 'p', x: TAV.cauldron + rnd(-24, 24), y: TAV.y - 80, vx: rnd(-8, 8), vy: -rnd(30, 60), c: '#a8e8b0', t: 0, life: 1.4, sz: 4, add: false });
+}
+function updDive(dt) {
+  const st = state, p = st.p, S = st.S;
+  updPlayer(dt);
+  if (scene !== 'play') return;
+  p.o2 -= dt;
+  if (p.o2 <= 0) { p.o2 = 0; p.hp -= tune.oxygen_dmg * dt; if (p.hp <= 0) { die(); return; } }
+  const b = st.boss;
+  if (b && b.st === 'sleep' && p.x > ARENA_L + 190) {
+    st.gate = true; b.st = 'intro'; b.tm = 2.4; banner(b.name, 'Depth ' + st.depth + ' guardian', 3.2); tone(55, 1.4, 'sawtooth', 0.3, -10); st.shake = 8;
+  }
+  updMobs(dt); updBoss(dt); updProj(dt); updHaz(dt);
+  for (const f of st.fish) {
+    if (f.dead) continue;
+    f.ph += dt; const d = hyp(f.x - p.x, f.y - p.y);
+    f.vx = d < 130 ? sgn(f.x - p.x) * 95 : (f.x < 120 ? 38 : f.vx < 0 ? -36 : 36);
+    f.face = sgn(f.vx); f.x += f.vx * dt; f.y += Math.sin(f.ph * 2) * 10 * dt;
+  }
+  for (const pk of st.picks) {
+    pk.t += dt;
+    if (hyp(pk.x - p.x, pk.y - p.y) < 50) {
+      S.bag[pk.id] = (S.bag[pk.id] || 0) + 1; pk.done = true; fxText(p.x, p.y - 50, '+' + ITEMS[pk.id].n, '#ffd27a', 20); tone(780, 0.2, 'triangle', 0.2, 300);
+    }
+  }
+  st.picks = st.picks.filter(pk => !pk.done);
+  const sn = S.stain;
+  if (st.stain && S.stain === st.stain && hyp(sn.x - p.x, sn.y - p.y) < 56) {
+    S.souls += sn.souls; for (const id in sn.bag) S.bag[id] = (S.bag[id] || 0) + sn.bag[id];
+    toast(`You take back ${sn.souls} souls and what you carried.`, 3.5); tone(600, 0.5, 'sine', 0.2, 300); burst(sn.x, sn.y, 20, '#9ff0e0', 200, 0.9, true);
+    S.stain = null; st.stain = null;
+  }
+  if (st.line) { st.line.t -= dt; if (st.line.t <= 0) st.line = null; }
+  // what the diver can use here
+  st.near = null;
+  if (Math.abs(p.x - ROPE_X) < 100 && !st.gate) st.near = { label: 'E: climb the rope to the tavern', fn: () => { enterTavern(false); toast('Back in the tavern.'); } };
+  for (const c of st.chests) if (!c.open && Math.abs(p.x - c.x) < 60 && p.y > FLOOR - 130) st.near = { label: 'E: open the clam chest', fn: () => { c.open = true; giveItem('pearl'); if (rng() < 0.5) giveItem(pick(['squid', 'glowfin'])); burst(c.x, FLOOR - 30, 14, '#fff', 160, 0.6, true); } };
+  if (st.exit && Math.abs(p.x - st.exit.x) < 90) st.near = { label: state.depth >= 4 ? 'E: the way down' : 'E: climb out to the tavern', fn: () => (state.depth >= 4 ? menuExit() : (enterTavern(false), toast('Back in the tavern. Sell the catch.'))) };
+  if (st.near && tapped('KeyE')) st.near.fn();
+  if (st.victoryT > 0) { st.victoryT -= dt; if (st.victoryT <= 0) { S.endless = true; save(); st.gained = 'The Crowned Leviathan is felled'; scene = 'results'; } }
+  // the camera follows, and locks to the arena in a boss fight
+  const lo = st.gate ? ARENA_L : 0, hi = st.gate ? ARENA_R - W : LVLEN - W;
+  cam.x += (clamp(p.x - W / 2 + p.face * 60, lo, hi) - cam.x) * Math.min(1, dt * 5);
+}
+function updFx(dt) {
+  const st = state;
+  for (const f of st.fx) {
+    f.t += dt;
+    if (f.type === 'txt') f.y -= 36 * dt; else { f.x += f.vx * dt; f.y += f.vy * dt; f.vx *= 0.97; f.vy *= 0.97; if (!f.add && f.c !== '#a8e8b0') f.vy -= 20 * dt; }
+  }
+  st.fx = st.fx.filter(f => f.t < f.life);
+  if (st.toast) { st.toast.t -= dt; if (st.toast.t <= 0) st.toast = null; }
+  if (st.banner) { st.banner.t -= dt; if (st.banner.t <= 0) st.banner = null; }
+  st.shake = Math.max(0, (st.shake || 0) - dt * 30);
+}
+function updWorld(dt) {
+  const st = state;
+  if (st.menu) { updMenu(); updFx(dt); return; }
+  if (st.hs > 0) { st.hs -= dt; updFx(dt * 0.3); return; }
+  st.t += dt;
+  if (st.mode === 'tavern') updTavern(dt); else updDive(dt);
+  updFx(dt);
+}
+
+// ---- Drawing: the sea (2.5D: depth layers, fog, light) ---------------------------------
+const PAL = [null,
+  { top: '#0f5a78', bot: '#04182a', fog: '4,28,48', ray: 0.12, far: '#0c3c58', mid: '#082e46', near: '#06222f', sand: '#22343a', sand2: '#35504f' },
+  { top: '#0a4458', bot: '#031420', fog: '3,20,34', ray: 0.08, far: '#093548', mid: '#062734', near: '#041a22', sand: '#1c2c32', sand2: '#2e4648' },
+  { top: '#1a1a48', bot: '#030312', fog: '6,6,26', ray: 0.05, far: '#14143a', mid: '#0e0e2c', near: '#08081c', sand: '#16162a', sand2: '#26284a' }];
+const pal = d => PAL[((d - 1) % 3) + 1];
+let glowQ = [];
+const F = (m, c) => (m.flash > 0 ? '#fff' : c);
+function genBG(d) {
+  const r = mkr(d * 7919 + 13); r(); const bg = { far: [], mid: [], near: [], front: [] };
+  for (let bx = 0; bx < LVLEN * 0.15 + W + 400; bx += 70 + r() * 60) bg.far.push({ x: bx, w: 90 + r() * 140, h: 150 + r() * 260 });
+  for (let bx = 0; bx < LVLEN * 0.35 + W + 400; bx += 170 + r() * 160) bg.mid.push({ x: bx, w: 34 + r() * 40, h: 140 + r() * 200, kind: ['col', 'arch', 'rib'][Math.floor(r() * 3)] });
+  for (let bx = 0; bx < LVLEN * 0.62 + W + 300; bx += 120 + r() * 140) bg.near.push({ x: bx, w: 60 + r() * 100, h: 50 + r() * 110, kelp: r() < 0.6, sway: r() * 6 });
+  for (let bx = 0; bx < LVLEN * 1.35 + W + 300; bx += 380 + r() * 300) bg.front.push({ x: bx, h: 160 + r() * 160, sway: r() * 6 });
+  return bg;
+}
+function fogOver(a, P) { ctx.fillStyle = `rgba(${P.fog},${a})`; ctx.fillRect(0, 0, W, H); }
+function drawSea() {
+  const d = state.depth, P = pal(d), t = state.t, bg = state.bg;
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, P.top); g.addColorStop(1, P.bot); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 6; i++) { // slow light shafts from the surface
+    const x0 = ((i * 260 - cam.x * 0.12 + Math.sin(t * 0.2 + i) * 40) % (W + 400) + W + 400) % (W + 400) - 200;
+    const gr = ctx.createLinearGradient(0, 0, 0, H * 0.85); gr.addColorStop(0, `rgba(170,235,255,${P.ray})`); gr.addColorStop(1, 'rgba(170,235,255,0)');
+    ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = gr;
+    ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0 + 90, 0); ctx.lineTo(x0 + 280, H * 0.85); ctx.lineTo(x0 + 130, H * 0.85); ctx.closePath(); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  // far spires (parallax 0.15)
+  for (const s of bg.far) { const x = s.x - cam.x * 0.15; if (x < -300 || x > W + 100) continue; poly([[x, H], [x + s.w * 0.2, H - s.h], [x + s.w * 0.45, H - s.h * 0.72], [x + s.w * 0.7, H - s.h * 0.95], [x + s.w, H]], P.far); }
+  fogOver(0.28, P);
+  // mid ruins (0.35): columns, arches, ribs of a sunken ship
+  for (const s of bg.mid) {
+    const x = s.x - cam.x * 0.35; if (x < -300 || x > W + 100) continue;
+    ctx.fillStyle = P.mid; ctx.strokeStyle = P.mid;
+    if (s.kind === 'col') { ctx.fillRect(x, H - s.h, s.w, s.h); ctx.fillRect(x - 6, H - s.h, s.w + 12, 14); ctx.fillRect(x + 6, H - s.h - 22, s.w - 12, 22); }
+    else if (s.kind === 'arch') { ctx.fillRect(x, H - s.h, 26, s.h); ctx.fillRect(x + 90, H - s.h, 26, s.h); ctx.lineWidth = 24; ctx.beginPath(); ctx.arc(x + 58, H - s.h, 58, Math.PI, 0); ctx.stroke(); }
+    else { ctx.lineWidth = 12; for (let k = 0; k < 4; k++) { ctx.beginPath(); ctx.arc(x + k * 46, H + 10, 130 + s.h * 0.2, Math.PI * 1.05, Math.PI * 1.45); ctx.stroke(); } }
+  }
+  fogOver(0.3, P);
+  // near rocks and kelp (0.62)
+  for (const s of bg.near) {
+    const x = s.x - cam.x * 0.62; if (x < -200 || x > W + 100) continue;
+    poly([[x, H], [x + s.w * 0.15, H - s.h * 0.8], [x + s.w * 0.5, H - s.h], [x + s.w * 0.85, H - s.h * 0.6], [x + s.w, H]], P.near);
+    if (s.kelp) { ctx.strokeStyle = '#0a3a30'; ctx.lineWidth = 7; ctx.beginPath(); ctx.moveTo(x + s.w * 0.5, H - s.h * 0.9); for (let j = 1; j <= 7; j++) ctx.lineTo(x + s.w * 0.5 + Math.sin(t * 0.9 + s.sway + j * 0.6) * 10 * j * 0.3, H - s.h * 0.9 - j * 28); ctx.stroke(); }
+  }
+  fogOver(0.18, P);
+}
+function drawFloor(P) {
+  const bgc = P.sand;
+  for (let k = 0; k < 3; k++) { // the floor bands slide at different speeds, so the ground has a slope
+    const f = [0.8, 0.9, 1][k], y = FLOOR - 4 + k * 26;
+    ctx.fillStyle = k === 2 ? P.sand2 : bgc; ctx.fillRect(cam.x, y, W + 4, H - y);
+    for (let x = Math.floor((cam.x * f) / 90) * 90; x < cam.x * f + W + 90; x += 90) {
+      const h = (x * 31 + k * 17) & 7, sx = x - cam.x * f + cam.x;
+      ctx.fillStyle = k === 2 ? '#41605c' : '#2a403f'; ctx.fillRect(snap(sx + h * 6), y + 6 + (h % 3) * 8, 9 + h, 6);
+      ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(snap(sx + 40), y + 18 + (h % 2) * 10, 24, 3);
+    }
+    ctx.fillStyle = k === 2 ? '#5d8a7e' : '#3a5a58'; ctx.fillRect(cam.x, y, W + 4, 3);
+  }
+}
+function drawKelpFront(P) {
+  const t = state.t;
+  for (const s of state.bg.front) {
+    const x = s.x - cam.x * 1.35; if (x < -100 || x > W + 100) continue;
+    ctx.strokeStyle = 'rgba(2,12,14,0.9)'; ctx.lineWidth = 14; ctx.beginPath(); ctx.moveTo(x, H + 10);
+    for (let j = 1; j <= 8; j++) ctx.lineTo(x + Math.sin(t * 0.8 + s.sway + j * 0.5) * 14 * j * 0.35, H - j * s.h / 8); ctx.stroke();
+  }
+  for (const s of state.snow) { // marine snow at several depths
+    const sx = (((s.x - cam.x * s.z * 0.5 + Math.sin(state.t * 0.4 + s.s) * 12) % W) + W) % W, sy = (s.y + state.t * 12 * s.z) % H;
+    ctx.fillStyle = `rgba(200,240,255,${0.18 + s.z * 0.18})`; ctx.fillRect(snap(sx), snap(sy), s.z > 1 ? 6 : 3, s.z > 1 ? 6 : 3);
+  }
+}
+
+// ---- Drawing: figures ------------------------------------------------------------------
+function drawDiver(p, t) {
+  const a = p.act, k = p.dur ? p.at / p.dur : 0, kick = Math.round(Math.sin(t * 9 + p.x * 0.02) * 1);
+  ctx.save();
+  if (p.inv > 0 && a !== 'roll' && Math.floor(t * 30) % 2 === 0) ctx.globalAlpha = 0.5;
+  const hurt = p.flash > 0, c = x => (hurt ? '#fff' : x);
+  fig(p.x, p.y, p.face, 1, () => {
+    if (a === 'roll') ctx.rotate(k * Math.PI * 2);
+    R(-9, -4, 3, 8, c('#6f7d8a')); R(-8, -6, 1, 2, c('#9fb0bd')); // air tank
+    R(-4 + kick, 5, 3, 4, c('#3b4852')); R(1 - kick, 5, 3, 4, c('#3b4852')); R(-5 + kick, 8, 5, 1, c('#2a343c')); R(0 - kick, 8, 5, 1, c('#2a343c')); // legs and fins
+    R(-4, -4, 9, 9, c('#6b7b8c')); R(-4, 1, 9, 3, c('#4c5a69')); R(-4, 2, 9, 1, c('#a87c3a')); R(-3, -3, 3, 2, c('#8fa0b0')); // armour
+    R(-3, -10, 8, 7, c('#8e9aa6')); R(-3, -10, 8, 1, c('#b8c4cc')); R(1, -8, 5, 3, c('#35e8d4')); R(2, -8, 1, 1, c('#e8fffb')); // helm and glowing visor
+    R(-1, -12, 2, 2, c('#a87c3a')); // crest
+    if (p.guard || a === 'drink') { // shield held up, or the flask
+      if (p.guard) { R(5, -7, 3, 12, c('#7a5a30')); R(5, -7, 1, 12, c('#c9a24a')); R(6, -2, 1, 3, c('#c9a24a')); }
+      else { R(5, -9, 2, 4, '#35e8d4'); R(5, -10, 2, 1, '#e8fffb'); }
+    }
+    let ang = 1.1;
+    if (a === 'light') ang = lerp(-1.4, 1.2, clamp(k / 0.62, 0, 1));
+    else if (a === 'heavy') ang = k < 0.4 ? lerp(0.6, -2.5, k / 0.4) : lerp(-2.5, 1.4, clamp((k - 0.4) / 0.24, 0, 1));
+    else if (p.guard) ang = -0.3;
+    if (!(a === 'drink')) {
+      ctx.save(); ctx.translate(5 * U, -1 * U); ctx.rotate(ang);
+      R(0, -1, 14, 2, c('#d4e6f2')); R(0, -1, 14, 1, c('#fff')); R(-1, -3, 2, 6, c('#c9a24a')); R(-4, -1, 3, 2, c('#5a3a2a'));
+      ctx.restore();
+    }
+  });
+  ctx.restore();
+  if (p.act === 'heavy' && k > 0.4 && k < 0.7) { ctx.strokeStyle = 'rgba(220,250,255,0.5)'; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(p.x, p.y, 70 * (p.face), -1.3, 1.1, p.face < 0); ctx.stroke(); }
+  glowQ.push([p.x + p.face * 12, p.y - 20, 70, '60,240,220', 0.25]);
+}
+function drawAngler(m) {
+  const t = state.t, el = m.elite, wind = m.st === 'wind' || m.st === 'pause', wob = Math.round(Math.sin(t * 8 + m.ph));
+  const c1 = F(m, el ? '#5a2438' : '#2a4260'), c2 = F(m, el ? '#7a3a50' : '#3c5f82'), c3 = F(m, el ? '#c08090' : '#7fa4c0');
+  if (wind) { ctx.save(); ctx.strokeStyle = `rgba(255,90,90,${0.35 + 0.3 * Math.sin(t * 30)})`; ctx.lineWidth = 6; ctx.setLineDash([16, 12]); ctx.beginPath(); ctx.moveTo(m.x, m.y); ctx.lineTo(m.x + Math.cos(m.aim) * 460, m.y + Math.sin(m.aim) * 460); ctx.stroke(); ctx.restore(); }
+  fig(m.x, m.y, m.face, el ? 1.3 : 1, () => {
+    R(-11, -2 + wob, 4, 4, c1); R(-14, -5 + wob, 2, 10, c2);
+    R(-8, -4, 16, 8, c1); R(-6, -6, 12, 2, c1); R(-6, 4, 12, 2, c2); R(-7, 3, 14, 1, c3);
+    if (el) { R(-5, -9, 2, 3, '#e0b0b0'); R(0, -10, 2, 4, '#e0b0b0'); R(4, -9, 2, 3, '#e0b0b0'); }
+    R(-2, -8, 5, 2, c2);
+    R(3, -3, 3, 3, F(m, '#e8f6ff')); R(5, -2, 1, 2, '#101820');
+    R(4, 1, 7, 3, c1); for (let i = 0; i < 4; i++) { R(5 + i * 2, 0, 1, 2, '#f0f0f0'); R(5 + i * 2, 3, 1, 1, '#f0f0f0'); }
+    R(1, -10, 1, 4, c3); R(2, -12, 4, 1, c3); R(5, -12, 1, 3, c3); R(5, -9, 3, 3, wind ? '#fff' : '#aef8ff');
+  });
+  glowQ.push([m.x + m.face * 7 * U * (el ? 1.3 : 1), m.y - 10 * U * (el ? 1.3 : 1), wind ? 110 : 60, '120,255,240', wind ? 0.9 : 0.5]);
+}
+function drawJelly(m) {
+  const t = state.t + m.ph, charge = m.st === 'charge', c = F(m, m.elite ? '#a04a8a' : '#7a4aa0'), c2 = F(m, '#d9a0ff');
+  fig(m.x, m.y, 1, m.elite ? 1.3 : 1, () => {
+    ctx.globalAlpha = 0.9;
+    R(-4, -9, 8, 1, c); R(-6, -8, 12, 1, c); R(-7, -7, 14, 5, c); R(-8, -3, 16, 2, c); R(-4, -6, 8, 3, charge ? '#fff' : c2); R(-5, -3, 2, 1, '#201030'); R(3, -3, 2, 1, '#201030');
+    for (let i = 0; i < 6; i++) { const x = -7 + i * 3, len = 5 + (i % 2) * 3; for (let j = 0; j < len; j++) R(x + Math.round(Math.sin(t * 3 + j * 0.8 + i) * 1.2), -1 + j, 1, 1, i % 2 ? c2 : c); }
+    ctx.globalAlpha = 1;
+  });
+  glowQ.push([m.x, m.y, charge ? 110 : 60, '210,140,255', charge ? 0.9 : 0.4]);
+}
+function drawCrab(m) {
+  const wind = m.st === 'wind', swing = m.st === 'swing', rec = m.st === 'rec', leg = Math.round(Math.sin(state.t * 8 + m.ph));
+  const sh = F(m, rec ? '#c85a30' : '#8a3a22'), hi = F(m, rec ? '#e88a5a' : '#b85a38'), dk = F(m, '#4a1c10');
+  fig(m.x, m.y, m.face, m.elite ? 1.3 : 1, () => {
+    for (let i = 0; i < 3; i++) { R(-9 + i * 3 + leg * (i % 2), 3, 1, 5, dk); R(-10 + i * 3 + leg * (i % 2), 7, 2, 1, dk); }
+    R(-8, -4, 16, 8, sh); R(-6, -6, 12, 2, hi); R(-7, -2, 14, 1, dk);
+    if (!rec) { R(-5, -9, 2, 3, hi); R(0, -10, 2, 4, hi); R(4, -9, 2, 3, hi); } // armour spikes drop away when it is open
+    R(2, -8, 1, 3, dk); R(5, -8, 1, 3, dk); R(1, -10, 3, 2, '#e8f6ff'); R(4, -10, 3, 2, '#e8f6ff'); R(2, -9, 1, 1, '#101820'); R(5, -9, 1, 1, '#101820');
+    if (swing) { R(8, -4, 12, 4, sh); R(16, -8, 5, 4, sh); R(16, 0, 5, 3, sh); R(10, -3, 6, 1, hi); }
+    else if (wind) { R(8, -6, 4, 3, sh); R(9, -16, 7, 10, sh); R(9, -20, 3, 5, hi); R(14, -20, 3, 5, hi); R(12, -16, 2, 4, '#000'); }
+    else { R(8, -3, 5, 3, sh); R(11, -6, 5, 6, sh); R(14, -4, 3, 2, '#000'); }
+    R(-13, -3, 5, 3, sh); R(-16, -6, 5, 5, sh);
+  });
+  if (wind) { ctx.fillStyle = `rgba(255,90,60,${0.3 + 0.3 * Math.sin(state.t * 30)})`; ctx.fillRect(m.x + m.face * 8, FLOOR - 170, m.face * 130, 170); }
+}
+function drawEel(m) {
+  const t = state.t;
+  if (m.st === 'tele') { // the warning line across the water
+    const x0 = Math.min(m.sx, m.ex), x1 = Math.max(m.sx, m.ex);
+    ctx.fillStyle = `rgba(255,70,70,${0.14 + 0.16 * Math.sin(t * 24)})`; ctx.fillRect(x0, m.ty - 18, x1 - x0, 36);
+    ctx.fillStyle = 'rgba(255,120,100,0.7)'; for (let x = x0; x < x1; x += 90) { const xx = m.dir > 0 ? x : x1 - (x - x0); ctx.fillRect(xx, m.ty - 3, 40, 6); }
+    return;
+  }
+  if (m.hidden) { // the hole it lurks in, and two eyes
+    ctx.fillStyle = '#04080c'; ctx.fillRect(m.ox - 36, FLOOR - 10, 72, 16); ctx.fillStyle = '#0a1418'; ctx.fillRect(m.ox - 28, FLOOR - 16, 56, 8);
+    if (Math.abs(state.p.x - m.ox) < 700) { ctx.fillStyle = '#ffd34a'; ctx.fillRect(m.ox - 15, FLOOR - 10, 6, 6); ctx.fillRect(m.ox + 9, FLOOR - 10, 6, 6); glowQ.push([m.ox, FLOOR - 8, 40, '255,210,60', 0.5]); }
+    return;
+  }
+  const body = F(m, '#4a6a2e'), spot = F(m, '#d8c050'), belly = F(m, '#9aa860');
+  for (let i = m.trail.length - 1; i >= 1; i--) { const s = m.trail[i], n = Math.max(2, 6 - Math.floor(i / 3)); ctx.fillStyle = i % 2 ? body : F(m, '#3c5a24'); ctx.fillRect(snap(s.x - n * 1.5), snap(s.y - n * 1.5), n * 3, n * 3); if (i % 3 === 0) { ctx.fillStyle = spot; ctx.fillRect(snap(s.x), snap(s.y - n * 1.5), 3, 3); } }
+  fig(m.x, m.y, m.face, 1, () => {
+    R(-6, -4, 12, 8, body); R(-6, 2, 12, 2, belly); R(4, -2, 8, 5, body); R(5, 3, 7, 2, F(m, '#2e4420')); R(-2, -7, 8, 3, F(m, '#6a8a3a'));
+    R(2, -3, 2, 2, '#ffd34a'); R(3, -2, 1, 1, '#000'); for (let i = 0; i < 3; i++) R(6 + i * 2, 2, 1, 2, '#f4f4f0'); R(-3, -2, 2, 2, spot);
+  });
+  glowQ.push([m.x, m.y, 50, '255,210,60', 0.25]);
+}
+
+function drawKnight(b) {
+  const t = b.t, st = b.st, c = n => (b.flash > 0 ? '#fff' : n), rest = st === 'rest', dy = rest ? 7 : 0;
+  const w = st === 'wind' ? 1 - b.tm / (b.tmax || 1) : 0;
+  let ang = 1.15, lean = 0, dx = 0;
+  if (st === 'wind' || st === 'act' || st === 'rec') {
+    if (b.atk === 'slam') ang = st === 'wind' ? lerp(1.15, -2.4, w) : st === 'act' ? 1.5 : 1.45;
+    if (b.atk === 'sweep') ang = st === 'wind' ? lerp(0.9, -2.3, w) : st === 'act' ? lerp(-2.3, 0.3, 1 - clamp(b.tm / 0.24, 0, 1)) : 0.3;
+    if (b.atk === 'thrust') { ang = 0.05; if (st === 'wind') { lean = -1; dx = -3 * w; } else if (st === 'act') dx = 2; }
+    if (b.atk === 'throw') ang = st === 'wind' ? lerp(1.0, -1.6, w) : -1.0;
+  }
+  if (rest) ang = 1.5;
+  const warn = st === 'wind' && (b.atk === 'slam' || b.atk === 'sweep' || b.atk === 'thrust');
+  ctx.save(); if (st === 'dying') ctx.globalAlpha = clamp(b.tm / 2.6 + 0.2, 0, 1);
+  if (warn) { // the readable tell: the sword and the strike zone glow
+    ctx.fillStyle = `rgba(255,80,50,${0.1 + 0.2 * w})`;
+    if (b.atk === 'slam') ctx.fillRect(b.x + b.face * 5 - (b.face < 0 ? 170 : 0), FLOOR - 270, 170, 270);
+    if (b.atk === 'sweep') ctx.fillRect(b.x + b.face * 5 - (b.face < 0 ? 200 : 0), FLOOR - 170, 200, 170);
+    if (b.atk === 'thrust') ctx.fillRect(b.x + b.face * 5 - (b.face < 0 ? 500 : 0), FLOOR - 180, 500, 180);
+  }
+  fig(b.x + dx * 6, FLOOR, b.face, 2, () => {
+    const walk = st === 'idle' ? Math.round(Math.sin(t * 4)) : 0;
+    ctx.translate(0, dy * U * 0);
+    R(-6 + walk, -9 + dy, 5, 9 - dy, c('#3a342c')); R(1 - walk, -9 + dy, 5, 9 - dy, c('#3a342c')); R(-7 + walk, -2, 7, 2, c('#2a251f')); R(0 - walk, -2, 7, 2, c('#2a251f'));
+    R(-11, -24 + dy, 3, 14, c('#1c4a3a')); R(-12, -12 + dy, 2, 6, c('#1c4a3a')); // tattered kelp cape
+    R(-8 + lean, -23 + dy, 16, 14, c('#5a4e42')); R(-5 + lean, -20 + dy, 3, 2, c('#7a5a3a')); R(1 + lean, -17 + dy, 4, 2, c('#7a5a3a')); R(-8 + lean, -12 + dy, 16, 2, c('#8a6a3a'));
+    R(-6 + lean, -22 + dy, 12, 9, c('#6e6252')); R(-3 + lean, -19 + dy, 1, 1, c('#a09070')); R(2 + lean, -19 + dy, 1, 1, c('#a09070'));
+    R(-11 + lean, -25 + dy, 6, 6, c('#6a5a48')); R(5 + lean, -25 + dy, 6, 6, c('#6a5a48'));
+    R(-5 + lean, -33 + dy, 10, 9, c('#7a6a58')); R(0 + lean, -30 + dy, 6, 1, c('#40ffe0')); R(-5 + lean, -33 + dy, 10, 1, c('#9a8a76'));
+    if (b.limps < 1) { R(-2 + lean, -37 + dy, 4, 4, c('#c8a050')); R(-1 + lean, -39 + dy, 2, 2, c('#e8c070')); } else { R(2 + lean, -34 + dy, 2, 2, c('#3a2a20')); }
+    R(2 + lean, -22 + dy, 6, 3, c('#5a4e42'));
+    ctx.save(); ctx.translate((7 + lean) * U, (-21 + dy) * U); ctx.rotate(ang);
+    R(0, -2, 28, 4, c(warn ? '#ffb090' : '#b8c4cc')); R(0, -2, 28, 1, c('#e8f0f4')); R(-1, -4, 2, 8, c('#a88a50')); R(-5, -1, 4, 2, c('#5a3a2a')); R(26, -1, 3, 2, c('#e8f0f4'));
+    ctx.restore();
+  });
+  ctx.restore();
+  glowQ.push([b.x + b.face * 6, FLOOR - 186 + dy * 6, 90, '60,255,230', 0.5]);
+  if (warn) glowQ.push([b.x + b.face * 80, FLOOR - 140, 160, '255,90,50', 0.4 * w]);
+}
+function drawMawHead(b, x, y, face, sc) {
+  const open = b.st === 'ctele' || b.st === 'charge' || b.st === 'fact' || b.st === 'ink' ? 4 : b.st === 'frec' ? 2 : 0, c = n => (b.flash > 0 ? '#fff' : n);
+  fig(x, y, face, sc, () => {
+    R(-9, -6, 18, 12, c('#3d5a3a')); R(5, -3, 9, 6, c('#456a42')); R(-9, -6, 18, 2, c('#5a7a50'));
+    R(-6, 6, 17, 3 + open * 0 , c('#2c4230')); R(-6, 6 + open, 17, 3, c('#2c4230'));
+    for (let i = 0; i < 6; i++) { R(-3 + i * 3, 4 + (open ? 0 : 0), 1, 2 + (open ? 1 : 0), '#f4f0e0'); R(-3 + i * 3, 6 + open - 2, 1, 2, '#f4f0e0'); }
+    R(0, -5, 4, 4, '#ffd34a'); R(1, -4, 1, 2, '#000'); R(-6, -3, 2, 2, c('#d8c050')); R(-2, -2, 2, 1, c('#d8c050'));
+    const sp = 3 - b.limps; for (let i = 0; i < sp; i++) R(-8 + i * 5, -9 - (i % 2), 3, 3 + (i % 2), c('#6a8a3a'));
+    if (b.limps) R(-8, -4, 3, 1, '#d85a4a');
+  });
+  glowQ.push([x + face * 3 * U * sc, y - 4 * U * sc, 90, '255,210,60', 0.35]);
+}
+function drawMaw(b) {
+  if (b.st === 'sleep') return;
+  const c = n => (b.flash > 0 ? '#fff' : n);
+  if (b.st === 'ctele') { ctx.save(); ctx.fillStyle = `rgba(255,70,70,${0.12 + 0.14 * Math.sin(b.t * 30)})`; ctx.translate(b.x, b.y); ctx.rotate(b.aim); ctx.fillRect(0, -34, 1500, 68); ctx.restore(); }
+  ctx.save(); if (b.st === 'dying') ctx.globalAlpha = clamp(b.tm / 2.6 + 0.2, 0, 1);
+  for (let i = b.segs.length - 1; i >= 1; i--) {
+    const s = b.segs[i], n = Math.round(lerp(7, 2.5, i / b.segs.length));
+    ctx.fillStyle = c(i % 2 ? '#3a5636' : '#345030'); ctx.fillRect(snap(s.x - n * 1.5), snap(s.y - n * 1.5), snap(n * 3), snap(n * 3));
+    ctx.fillStyle = c('#b0b068'); ctx.fillRect(snap(s.x - n * 1.5), snap(s.y + n * 0.5), snap(n * 3), 3);
+    if (i % 2 === 0) { ctx.fillStyle = c('#d8c050'); ctx.fillRect(snap(s.x), snap(s.y - n * 1.5), 6, 6); }
+    if (i % 2 === 1 && i < 12) { ctx.fillStyle = c('#6a8a3a'); ctx.fillRect(snap(s.x - 3), snap(s.y - n * 1.5 - 6), 6, 6); }
+  }
+  drawMawHead(b, b.x, b.y, b.face || -1, 1.7);
+  ctx.restore();
+}
+function drawLevi(b) {
+  if (b.st === 'sleep') return;
+  const c = n => (b.flash > 0 ? '#fff' : n), mouth = b.mouth, t = b.t, rest = b.st === 'rest';
+  ctx.save(); if (b.st === 'dying') ctx.globalAlpha = clamp(b.tm / 2.6 + 0.2, 0, 1);
+  fig(b.x, b.y + b.bob, -1, 3, () => {
+    R(12, -13, 46, 30, c('#1c2040')); for (let i = 0; i < 5; i++) R(16 + i * 8, -10 + (i % 2) * 8, 4, 3, c('#2a3060')); // the great body behind the head
+    R(-12, -13, 26, 12, c('#2d3258')); R(-14, -9, 28, 18, c('#2d3258')); R(-12, -13, 26, 2, c('#3c4476')); R(-13, 5, 26, 5, c('#262a4c'));
+    R(4, -7, 6, 5, c(rest ? '#a05060' : '#ff4a7a')); R(6, -7, 1, 5, '#200'); R(4, -8, 6, 1, c('#1a1c36'));
+    R(-14 + 0, -2, 4, 3, c('#3c4476')); R(-4, -3, 2, 1, c('#3c4476'));
+    R(-13, 6 + mouth * 4, 27, 6, c('#232848'));
+    for (let i = 0; i < 7; i++) { R(-12 + i * 4, 3 + mouth * 1, 1, 3, '#e8e0d0'); R(-12 + i * 4 + 2, 6 + mouth * 4 - 2, 1, 3, '#e8e0d0'); }
+    const sp = 3 - b.limps; for (let i = 0; i < sp; i++) { R(-9 + i * 7, -19 - (i % 2) * 2, 3, 6 + (i % 2) * 2, c('#e0708a')); R(-8 + i * 7, -21 - (i % 2) * 2, 1, 3, '#f4a0b4'); }
+    for (let i = 0; i < 4; i++) for (let j = 0; j < 9; j++) R(-10 + i * 6 + Math.round(Math.sin(t * 2 + j * 0.5 + i)), 10 + mouth * 4 + j, 1, 1, c('#5a4a8a')); // barbels
+  });
+  ctx.restore();
+  glowQ.push([b.x + 6 * 9 * -1 - 15, b.y + b.bob - 50, 150, '255,80,130', rest ? 0.3 : 0.6]);
+}
+function drawBoss(b) { if (b.k === 'knight') drawKnight(b); else if (b.k === 'maw') drawMaw(b); else drawLevi(b); }
+
+function drawHazards() {
+  const t = state.t;
+  for (const h of state.haz) {
+    const tele = h.t < h.tele, on = !tele && h.t < h.tele + h.act, k = h.t / h.tele, pulse = 0.5 + 0.5 * Math.sin(t * 28);
+    if (h.type === 'col') {
+      if (tele) { ctx.fillStyle = `rgba(255,70,110,${0.08 + 0.12 * k})`; ctx.fillRect(h.x - h.hw, h.y - h.hh, h.hw * 2, h.hh * 2); ctx.fillStyle = `rgba(255,120,150,${0.4 + 0.4 * pulse})`; ctx.fillRect(h.x - h.hw, FLOOR - 6, h.hw * 2, 8); }
+      else if (on) for (let j = 0; j < 22; j++) { const yy = FLOOR - j * 20, w = h.hw * (1 - j / 26) + Math.sin(t * 20 + j) * 3; ctx.fillStyle = j % 2 ? '#7a3a8a' : '#6a2a7a'; ctx.fillRect(snap(h.x - w), yy - 20, snap(w * 2), 20); ctx.fillStyle = '#d890d8'; ctx.fillRect(snap(h.x - w + 6), yy - 14, 6, 6); }
+    } else if (h.type === 'band') {
+      if (tele) { ctx.fillStyle = `rgba(255,70,110,${0.07 + 0.12 * k})`; ctx.fillRect(h.x - h.hw, h.y - h.hh, h.hw * 2, h.hh * 2); ctx.fillStyle = `rgba(255,150,170,${0.3 + 0.3 * pulse})`; ctx.fillRect(h.x - h.hw, h.y - h.hh, h.hw * 2, 4); ctx.fillRect(h.x - h.hw, h.y + h.hh - 4, h.hw * 2, 4); }
+      else if (on) { ctx.fillStyle = 'rgba(120,200,255,0.55)'; ctx.fillRect(h.x - h.hw, h.y - h.hh, h.hw * 2, h.hh * 2); ctx.fillStyle = 'rgba(230,250,255,0.8)'; for (let x = h.x - h.hw; x < h.x + h.hw; x += 70) ctx.fillRect(((x + t * 1600) % (h.hw * 2)) + h.x - h.hw, h.y - 30 + ((x / 70) % 3) * 30, 90, 6); }
+    } else if (h.type === 'bite') {
+      if (tele) { ctx.strokeStyle = `rgba(255,90,70,${0.5 + 0.4 * pulse})`; ctx.lineWidth = 4; ctx.strokeRect(h.x - h.hw, h.y - h.hh, h.hw * 2, h.hh * 2); ctx.fillStyle = `rgba(255,70,60,${0.06 + 0.1 * k})`; ctx.fillRect(h.x - h.hw, h.y - h.hh, h.hw * 2, h.hh * 2); }
+    } else if (h.type === 'spike') {
+      if (tele) { ctx.fillStyle = `rgba(255,120,150,${0.4 + 0.4 * pulse})`; ctx.fillRect(h.x - 3, 0, 6, h.y + h.hh); ctx.fillRect(h.x - h.hw, h.y + h.hh - 4, h.hw * 2, 6); }
+      else if (on) { poly([[h.x - h.hw, 0], [h.x + h.hw, 0], [h.x, h.y + h.hh]], '#e0708a'); poly([[h.x - 8, 0], [h.x + 8, 0], [h.x, h.y + h.hh - 30]], '#f8b8c8'); }
+    }
+  }
+}
+function drawProj() {
+  const t = state.t;
+  for (const q of state.proj) {
+    if (q.k === 'spore') { ctx.fillStyle = '#d9a0ff'; ctx.fillRect(snap(q.x - 9), snap(q.y - 9), 18, 18); ctx.fillStyle = '#fff'; ctx.fillRect(snap(q.x - 3), snap(q.y - 6), 6, 6); glowQ.push([q.x, q.y, 40, '210,140,255', 0.8]); }
+    else if (q.k === 'ink') { ctx.fillStyle = '#1a1030'; ctx.fillRect(snap(q.x - 15), snap(q.y - 12), 30, 24); ctx.fillStyle = '#4a2a7a'; ctx.fillRect(snap(q.x - 9), snap(q.y - 9), 12, 9); glowQ.push([q.x, q.y, 36, '120,60,200', 0.6]); }
+    else if (q.k === 'anchor') { ctx.save(); ctx.translate(q.x, q.y); ctx.rotate(t * 10); R(-1, -5, 2, 10, '#8a8478'); R(-4, -5, 8, 2, '#8a8478'); R(-5, 2, 3, 3, '#8a8478'); R(2, 2, 3, 3, '#8a8478'); R(-3, 4, 6, 1, '#8a8478'); ctx.restore(); glowQ.push([q.x, q.y, 40, '255,120,70', 0.3]); }
+    else if (q.k === 'wave') { for (let i = 0; i < 5; i++) { ctx.fillStyle = i % 2 ? '#bfe8ff' : '#7ac0e8'; ctx.fillRect(snap(q.x - 24 + i * 9), snap(FLOOR - 8 - (i === 2 ? 40 : i % 2 ? 24 : 30)), 9, snap(i === 2 ? 40 : 30)); } glowQ.push([q.x, FLOOR - 24, 50, '160,220,255', 0.5]); }
+    else if (q.k === 'bubble') { ctx.strokeStyle = '#bff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(q.x, q.y, 14, 0, 6.3); ctx.stroke(); ctx.fillStyle = 'rgba(190,255,255,0.35)'; ctx.fill(); }
+  }
+}
+function drawFishPx(f) { fig(f.x, f.y, f.face, 1, () => { R(-3, -1, 6, 3, '#b8d0dc'); R(-3, 1, 6, 1, '#e8f4f8'); R(-5, -2, 2, 5, '#8aa8b8'); R(2, -1, 1, 1, '#101820'); }); }
+function drawStain(s) {
+  const t = state.t, y = s.y + Math.sin(t * 2) * 6;
+  glowQ.push([s.x, y, 90 + 12 * Math.sin(t * 3), '130,255,235', 0.8]);
+  ctx.save(); ctx.globalAlpha = 0.55; fig(s.x, y, 1, 1, () => { R(-3, -8, 6, 6, '#bff'); R(-4, -2, 8, 8, '#8fe0d0'); R(-3, 6, 3, 4, '#8fe0d0'); R(1, 6, 3, 4, '#8fe0d0'); }); ctx.restore();
+}
+function drawDiveProps() {
+  const P = pal(state.depth), t = state.t;
+  // the boat above, with its rope
+  poly([[ROPE_X - 150, -4], [ROPE_X + 170, -4], [ROPE_X + 130, 38], [ROPE_X - 110, 38]], '#1a120c'); ctx.fillStyle = '#2c1e14'; ctx.fillRect(ROPE_X - 100, 30, 210, 8);
+  ctx.fillStyle = '#3a2a1c'; ctx.fillRect(ROPE_X + 4, 0, 6, 24); glowQ.push([ROPE_X + 7, 36, 90, '255,170,70', 0.8]);
+  ctx.strokeStyle = '#8a6a3a'; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(ROPE_X, 38); for (let y = 38; y < FLOOR; y += 20) ctx.lineTo(ROPE_X + Math.sin(t + y * 0.02) * 4, y); ctx.stroke();
+  for (let y = 80; y < FLOOR; y += 60) { ctx.fillStyle = '#6a4a2a'; ctx.fillRect(ROPE_X - 8, y, 16, 5); }
+  for (const c of state.chests) { // clam chests
+    const o = c.open; poly([[c.x - 26, FLOOR], [c.x - 22, FLOOR - 14], [c.x + 22, FLOOR - 14], [c.x + 26, FLOOR]], '#6a4a5a');
+    poly([[c.x - 26, FLOOR - 14], [c.x - 20, FLOOR - (o ? 40 : 28)], [c.x + 20, FLOOR - (o ? 40 : 28)], [c.x + 26, FLOOR - 14]], '#8a5a72');
+    if (!o) glowQ.push([c.x, FLOOR - 18, 40, '255,240,220', 0.5]); else { ctx.fillStyle = '#e8f0f0'; ctx.fillRect(c.x - 6, FLOOR - 24, 12, 10); }
+  }
+  // the fog gate that seals a boss arena
+  const closed = state.gate;
+  const gg = ctx.createLinearGradient(ARENA_L - 40, 0, ARENA_L + 40, 0); gg.addColorStop(0, 'rgba(120,230,230,0)'); gg.addColorStop(0.5, `rgba(140,240,235,${closed ? 0.6 : 0.16})`); gg.addColorStop(1, 'rgba(120,230,230,0)');
+  ctx.fillStyle = gg; ctx.fillRect(ARENA_L - 40, 0, 80, FLOOR);
+  for (let y = 40; y < FLOOR; y += 70) { ctx.fillStyle = `rgba(200,255,250,${(closed ? 0.8 : 0.3) * (0.5 + 0.5 * Math.sin(t * 2 + y))})`; ctx.fillRect(ARENA_L - 4, y, 8, 22); }
+  if (state.exit) { // out of the arena
+    const x = state.exit.x; ctx.strokeStyle = '#8a6a3a'; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(x, 38); ctx.lineTo(x, FLOOR); ctx.stroke(); glowQ.push([x, FLOOR - 40, 100, '255,200,100', 0.7]);
+    if (state.depth >= 4) { ctx.fillStyle = '#02040a'; ctx.fillRect(x + 50, FLOOR - 8, 90, 14); glowQ.push([x + 95, FLOOR, 70, '120,60,255', 0.6]); }
+  }
+  if (state.stain && state.S.stain === state.stain) drawStain(state.stain);
+}
+
+// ---- Drawing: the tavern ----------------------------------------------------------------
+function drawPatron(x, y, face, i) {
+  const coats = ['#4a3a5a', '#3a5a4a', '#5a4a3a', '#3a4a6a', '#6a3a3a', '#4a5a5a'], skin = ['#c8a07a', '#a07858', '#e0b890'];
+  fig(x, y, face, 1, () => {
+    R(-3, -9 + (i % 2), 6, 6, skin[i % 3]); R(-4, -10 + (i % 2), 8, 2, ['#2a1c12', '#6a4a2a', '#aaa'][i % 3]);
+    R(-4, -3, 8, 8, coats[i % 6]); R(4, 0, 3, 3, '#c9a24a'); R(-5, 5, 10, 2, '#2a1c12');
+  });
+}
+function drawTavern() {
+  const st = state, p = st.p, S = st.S, t = st.t;
+  clear('#241913');
+  for (let y = 40; y < 610; y += 40) for (let x = ((y / 40) % 2) * 40 - 40; x < W; x += 80) {
+    ctx.fillStyle = ['#2c2018', '#30241b', '#281c15', '#33261c', '#2a1e17'][((x * 7 + y * 13) >>> 0) % 5]; ctx.fillRect(x + 2, y + 2, 76, 36);
+  }
+  ctx.fillStyle = '#120d09'; ctx.fillRect(0, 0, W, 54); for (let x = 60; x < W; x += 220) ctx.fillRect(x, 0, 26, 130);
+  text('THE DROWNED HEARTH', W / 2, 30, 22, '#c9a24a');
+  for (const wx of [330, 720, 1010]) { // portholes onto the sea
+    ctx.save(); ctx.beginPath(); ctx.arc(wx, 215, 64, 0, 6.3); ctx.clip();
+    const g = ctx.createLinearGradient(0, 150, 0, 280); g.addColorStop(0, '#1a6a88'); g.addColorStop(1, '#06243a'); ctx.fillStyle = g; ctx.fillRect(wx - 70, 145, 140, 140);
+    const fx = ((t * 14 + wx) % 220) - 110; ctx.fillStyle = '#0a3048'; ctx.fillRect(wx - fx - 10, 200 + Math.sin(t + wx) * 8, 26, 9); ctx.fillRect(wx - fx + 12, 203 + Math.sin(t + wx) * 8, 8, 14);
+    ctx.fillStyle = 'rgba(200,255,255,0.25)'; ctx.fillRect(wx - 24, 140, 18, 150);
+    ctx.restore(); ctx.strokeStyle = '#6a5a48'; ctx.lineWidth = 10; ctx.beginPath(); ctx.arc(wx, 215, 66, 0, 6.3); ctx.stroke();
+    ctx.fillStyle = '#a89878'; for (let k = 0; k < 8; k++) ctx.fillRect(wx + Math.cos(k * 0.785) * 66 - 3, 215 + Math.sin(k * 0.785) * 66 - 3, 6, 6);
+  }
+  ctx.fillStyle = '#3a2616'; ctx.fillRect(0, 630, W, 90); ctx.fillStyle = '#2a190e'; for (let x = 0; x < W; x += 64) ctx.fillRect(x, 630, 3, 90); ctx.fillStyle = '#4a3220'; ctx.fillRect(0, 630, W, 4);
+  // patrons: the more you sell and cook, the fuller it gets
+  const n = Math.min(6, 1 + renown() + Math.floor(S.cooked / 2)), spots = [[470, 604], [690, 604], [860, 604], [1040, 604], [300, 604], [1220, 604]];
+  for (let i = 0; i < n; i++) { const [x, y] = spots[i]; ctx.fillStyle = '#4a3220'; ctx.fillRect(x - 30, y - 8, 60, 6); ctx.fillRect(x - 3, y - 4, 6, 34); drawPatron(x, y - 12, i % 2 ? -1 : 1, i); ctx.fillStyle = '#c9a24a'; ctx.fillRect(x + 12, y - 16, 6, 7); }
+  // hearth
+  ctx.fillStyle = '#4a4038'; ctx.fillRect(120, 420, 160, 180); ctx.fillStyle = '#5a4e44'; ctx.fillRect(108, 410, 184, 22); ctx.fillStyle = '#120a06'; ctx.fillRect(150, 470, 100, 130);
+  ctx.fillStyle = '#3a3028'; for (let k = 0; k < 6; k++) ctx.fillRect(122 + (k % 2) * 6, 436 + k * 28, 30, 10);
+  const fl = Math.sin(t * 9) * 5; poly([[160, 600], [175, 540 + fl], [190, 570], [205, 510 - fl], [220, 565], [238, 545 + fl], [248, 600]], '#ff7a20'); poly([[180, 600], [195, 555 - fl], [208, 585], [218, 540 + fl], [232, 600]], '#ffc040'); poly([[196, 600], [206, 570], [216, 600]], '#fff0a0');
+  ctx.fillStyle = '#2a1a10'; ctx.fillRect(160, 592, 90, 8);
+  // lantern shrine
+  ctx.fillStyle = '#4a5a68'; ctx.fillRect(380, 520, 30, 78); ctx.fillStyle = '#6a7a88'; ctx.fillRect(372, 512, 46, 10); ctx.fillRect(372, 594, 46, 6);
+  ctx.fillStyle = '#9ff0ff'; ctx.fillRect(388, 470, 14, 24); ctx.fillStyle = '#e8ffff'; ctx.fillRect(391, 474, 8, 12); ctx.strokeStyle = '#6a7a88'; ctx.lineWidth = 3; ctx.strokeRect(386, 468, 18, 28); ctx.fillRect(393, 456, 4, 12);
+  // cauldron
+  ctx.strokeStyle = '#3a2a1c'; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(550, 600); ctx.lineTo(585, 520); ctx.lineTo(620, 600); ctx.stroke();
+  ctx.fillStyle = '#2a2a30'; ctx.beginPath(); ctx.ellipse(585, 548, 46, 36, 0, 0, 6.3); ctx.fill(); ctx.fillStyle = '#1a1a20'; ctx.fillRect(536, 516, 98, 10);
+  ctx.fillStyle = '#4a8a5a'; ctx.fillRect(546, 518, 78, 7); ctx.fillStyle = '#8ad89a'; ctx.fillRect(560 + Math.sin(t * 3) * 10, 516, 8, 5); ctx.fillStyle = '#ff7a20'; ctx.fillRect(570, 586, 30, 12);
+  // the counter, the shelf and the keeper
+  ctx.fillStyle = '#2a1c12'; ctx.fillRect(690, 462, 170, 8); for (let k = 0; k < 7; k++) { ctx.fillStyle = ['#4a8a6a', '#8a4a4a', '#c9a24a', '#4a6a9a'][k % 4]; ctx.fillRect(700 + k * 22, 440 - (k % 3) * 4, 10, 22 + (k % 3) * 4); }
+  fig(775, 540, 1, 1, () => { const nod = Math.round(Math.sin(t * 2)); R(-3, -12 + nod, 6, 6, '#c8a07a'); R(-4, -8 + nod, 8, 3, '#aaa'); R(-5, -6, 10, 11, '#3a5a7a'); R(-4, -2, 8, 7, '#e8e0d0'); R(-6, -13 + nod, 12, 2, '#6a4a2a'); });
+  ctx.fillStyle = '#5a3a22'; ctx.fillRect(690, 540, 170, 58); ctx.fillStyle = '#7a5a38'; ctx.fillRect(684, 534, 182, 10); ctx.fillStyle = '#c9a24a'; ctx.fillRect(740, 556, 70, 6);
+  // anvil and forge
+  poly([[915, 560], [975, 560], [972, 570], [958, 574], [962, 598], [928, 598], [932, 574], [918, 570]], '#3a3a42'); ctx.fillStyle = '#5a5a66'; ctx.fillRect(915, 558, 60, 5);
+  ctx.fillStyle = '#4a4038'; ctx.fillRect(990, 540, 56, 60); ctx.fillStyle = '#ff6a20'; ctx.fillRect(998, 574, 40, 14); ctx.fillStyle = '#ffd060'; ctx.fillRect(1006, 578, 22, 6);
+  // the dive door
+  ctx.fillStyle = '#2b3a44'; ctx.beginPath(); ctx.arc(TAV.door, 520, 62, 0, 6.3); ctx.fill(); ctx.strokeStyle = '#5a6a74'; ctx.lineWidth = 10; ctx.stroke();
+  ctx.strokeStyle = '#8a9aa4'; ctx.lineWidth = 6; for (let k = 0; k < 4; k++) { ctx.beginPath(); ctx.moveTo(TAV.door + Math.cos(k * 0.785) * 40, 520 + Math.sin(k * 0.785) * 40); ctx.lineTo(TAV.door - Math.cos(k * 0.785) * 40, 520 - Math.sin(k * 0.785) * 40); ctx.stroke(); }
+  ctx.fillStyle = '#7a5a30'; for (let y = 580; y < 640; y += 14) ctx.fillRect(TAV.door + 74, y, 28, 5);
+  text('DIVE', TAV.door, 446, 20, '#8fd8e0');
+  // light: amber pools and a warm dark around them
+  for (const lx of [300, 690, 1060]) { ctx.fillStyle = '#c9a24a'; ctx.fillRect(lx - 2, 130, 4, 40); ctx.fillRect(lx - 9, 168, 18, 22); ctx.fillStyle = '#ffe8a0'; ctx.fillRect(lx - 5, 172, 10, 14); }
+  drawDiver2();
+  ctx.fillStyle = 'rgba(14,6,2,0.34)'; ctx.fillRect(0, 0, W, H);
+  for (const [lx, ly, r, a] of [[200, 520, 330, 0.9 + Math.sin(t * 9) * 0.1], [300, 180, 200, 0.5], [690, 180, 220, 0.5], [1060, 180, 200, 0.5], [1020, 580, 150, 0.6], [585, 570, 150, 0.4], [TAV.shrine, 480, 130, 0.5]]) glow(lx, ly, r, lx === TAV.shrine ? '120,220,255' : '255,160,70', a * 0.55);
+  glow(TAV.door, 540, 160, '90,220,230', 0.4);
+  for (const f of st.fx) if (f.type === 'p') { ctx.fillStyle = f.c; ctx.globalAlpha = 1 - f.t / f.life; ctx.fillRect(snap(f.x), snap(f.y), f.sz, f.sz); ctx.globalAlpha = 1; }
+}
+function drawDiver2() { drawDiver(state.p, state.t); }
+
+// ---- Drawing: the dive and its HUD -------------------------------------------------------
+function bar(x, y, w, h, frac, col, back = 'rgba(0,0,0,0.6)', edge = '#c8d4dc') {
+  ctx.fillStyle = back; ctx.fillRect(x, y, w, h); ctx.fillStyle = col; ctx.fillRect(x + 2, y + 2, Math.max(0, (w - 4) * clamp(frac, 0, 1)), h - 4);
+  ctx.strokeStyle = edge; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
+}
+function drawFlaskIcon(x, y, full) { ctx.save(); ctx.translate(x, y); R(1, 0, 2, 2, full ? '#c8d4dc' : '#3a4650'); R(0, 2, 4, 5, full ? '#35e8d4' : '#1a2a30'); R(0, 6, 4, 1, full ? '#8ffff0' : '#1a2a30'); ctx.restore(); }
+function drawHUD() {
+  const st = state, p = st.p, S = st.S, dive = st.mode === 'dive';
+  bar(24, 20, Math.min(420, maxHP() * 2.4), 20, p.hp / maxHP(), p.hp / maxHP() < 0.3 ? '#e04a4a' : '#c83a3a');
+  text('HEALTH', 32, 30, 16, '#fff', 'left');
+  bar(24, 46, Math.min(340, maxStam() * 2.2), 14, p.stam / maxStam(), p.stam < 18 ? '#c8a040' : '#58b858');
+  if (dive) { bar(24, 66, 220, 12, p.o2 / maxO2(), p.o2 < 25 ? '#e0603a' : '#3ac8e0'); text('AIR', 252, 72, 16, p.o2 < 25 ? '#ff8a6a' : '#9ff0ff', 'left'); }
+  for (let i = 0; i < maxFlasks(); i++) drawFlaskIcon(24 + i * 20, dive ? 86 : 70, i < p.flasks);
+  if (S.dish) text(ITEMS[S.dish].dish, 24, dive ? 118 : 102, 16, '#ffd27a', 'left');
+  text(`Souls ${S.souls}`, W - 24, 24, 20, '#ffd27a', 'right'); text(`Gold ${S.gold}`, W - 24, 50, 20, '#fff0b0', 'right'); text(`Bag ${bagCount()}/${bagCap()}`, W - 24, 76, 20, bagCount() >= bagCap() ? '#ff8a6a' : '#cfe', 'right');
+  text(`Level ${S.lvl}   Blade ${S.wlvl}`, W - 24, 102, 16, '#cfe', 'right');
+  if (dive) text(depthName(st.depth), W - 24, 128, 16, '#9fc8d8', 'right');
+  const b = st.boss;
+  if (b && b.st !== 'sleep' && !b.dead) {
+    const w = 660, x = (W - w) / 2;
+    text(b.name, W / 2, 646, 22, b.st === 'rest' ? '#ffd27a' : '#ffe0d0');
+    bar(x, 662, w, 16, b.hp / b.maxhp, b.st === 'rest' ? '#e0b040' : '#b83a3a', 'rgba(0,0,0,0.7)', '#a8a098');
+    for (const th of b.th) { ctx.fillStyle = '#e8e0d0'; ctx.fillRect(x + w * th - 1, 660, 3, 20); }
+  }
+  if (st.near && !st.menu && scene === 'play') text(st.near.label, clamp(p.x - (dive ? cam.x : 0), 150, W - 150), p.y - 70, 20, '#fff6d0');
+  if (dive) text('J light  K heavy  L roll  Shift guard  R flask  Space harpoon  E use', 24, 706, 16, 'rgba(200,225,235,0.8)', 'left');
+  else text('A D walk   E use what you stand at   P pause', 24, 706, 16, 'rgba(220,200,160,0.85)', 'left');
+  if (st.toast) { ctx.globalAlpha = clamp(st.toast.t, 0, 1); text(st.toast.s, W / 2, 96, 20, '#fff6d0'); ctx.globalAlpha = 1; }
+  if (st.banner) {
+    const bn = st.banner, a = clamp(Math.min(bn.t, bn.t0 - bn.t) * 1.6, 0, 1); ctx.globalAlpha = a;
+    text(bn.s, W / 2, 230, 44, '#fff0d0'); text(bn.sub, W / 2, 274, 20, '#c8d8e0'); ctx.globalAlpha = 1;
+  }
+}
+function drawDive() {
+  const st = state, p = st.p, P = pal(st.depth);
+  glowQ = [];
+  drawSea();
+  const sx = (st.shake || 0) * (Math.sin(st.t * 90) * 0.6), sy = (st.shake || 0) * (Math.cos(st.t * 77) * 0.6);
+  ctx.save(); ctx.translate(-Math.round(cam.x) + sx, sy);
+  drawDiveProps();
+  for (const f of st.fish) if (!f.dead) drawFishPx(f);
+  for (const m of st.mobs) { if (m.dead) continue; if (m.x < cam.x - 300 || m.x > cam.x + W + 300) { if (m.k !== 'eel') continue; } ({ angler: drawAngler, jelly: drawJelly, crab: drawCrab, eel: drawEel })[m.k](m); }
+  if (st.boss) drawBoss(st.boss);
+  drawFloor(P);
+  for (const pk of st.picks) { const y = pk.y + Math.sin(pk.t * 3) * 5; glowQ.push([pk.x, y, 60, '255,210,120', 0.9]); ctx.fillStyle = '#ffd27a'; ctx.fillRect(snap(pk.x - 9), snap(y - 9), 18, 18); ctx.fillStyle = '#fff'; ctx.fillRect(snap(pk.x - 3), snap(y - 6), 6, 6); }
+  drawHazards();
+  drawDiver(p, st.t);
+  drawProj();
+  if (st.line) { const l = st.line, k = l.t / 0.28; ctx.strokeStyle = l.ok ? '#e8fffb' : '#9ac'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(l.x0, l.y0); ctx.lineTo(lerp(l.x0, l.x1, clamp(1.4 - k * 1.2, 0, 1)), l.y1); ctx.stroke(); R(Math.round(lerp(l.x0, l.x1, clamp(1.4 - k * 1.2, 0, 1)) / U) - 1, Math.round(l.y1 / U) - 1, 3, 2, '#fff'); }
+  for (const f of st.fx) {
+    if (f.type === 'p') { ctx.globalAlpha = clamp(1 - f.t / f.life, 0, 1); ctx.globalCompositeOperation = f.add ? 'lighter' : 'source-over'; ctx.fillStyle = f.c; ctx.fillRect(snap(f.x), snap(f.y), f.sz, f.sz); ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1; }
+  }
+  ctx.restore();
+  drawKelpFront(P);
+  // darkness with a light round the diver: deeper is darker, a boss arena is lifted so the fight reads
+  const tier = Math.min(3, ((st.depth - 1) % 3) + 1) + (st.depth > 3 ? 0.5 : 0), a = clamp(0.5 + 0.1 * (tier - 1) - (st.gate ? 0.1 : 0), 0.4, 0.86);
+  const px = p.x - cam.x, py = p.y, r0 = 520 + (dishFx().light ? 140 : 0);
+  const g = ctx.createRadialGradient(px, py, 50, px, py, r0); g.addColorStop(0, 'rgba(2,8,16,0)'); g.addColorStop(0.5, `rgba(2,8,16,${a * 0.4})`); g.addColorStop(1, `rgba(2,8,16,${a})`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (const [gx, gy, r, rgb, al] of glowQ) glow(gx - Math.round(cam.x) + sx, gy + sy, r, rgb, al);
+  for (const f of st.fx) if (f.type === 'txt') { ctx.globalAlpha = clamp(1 - f.t / f.life, 0, 1); text(f.s, f.x - cam.x, f.y, f.size, f.c); ctx.globalAlpha = 1; }
+  if (p.hp / maxHP() < 0.3 && st.mode === 'dive') { ctx.fillStyle = `rgba(120,0,0,${0.12 + 0.08 * Math.sin(st.t * 6)})`; ctx.fillRect(0, 0, W, H); }
+}
+function drawMenu() {
+  const m = state.menu; if (!m) return;
+  ctx.fillStyle = 'rgba(6,3,2,0.72)'; ctx.fillRect(0, 0, W, H);
+  const w = 820, x = (W - w) / 2, rows = Math.min(m.items.length, 8), h = 130 + rows * 42 + 56, y = (H - h) / 2;
+  ctx.fillStyle = '#1e1610'; ctx.fillRect(x, y, w, h); ctx.strokeStyle = '#c9a24a'; ctx.lineWidth = 4; ctx.strokeRect(x, y, w, h); ctx.strokeStyle = '#5a4630'; ctx.lineWidth = 2; ctx.strokeRect(x + 8, y + 8, w - 16, h - 16);
+  text(m.title, W / 2, y + 36, 30, '#ffe8b0'); text(m.sub, W / 2, y + 70, 18, '#c8b898');
+  const top = clamp(m.idx - 3, 0, Math.max(0, m.items.length - rows));
+  for (let i = 0; i < rows; i++) {
+    const it = m.items[top + i], yy = y + 118 + i * 42, sel = top + i === m.idx;
+    if (sel) { ctx.fillStyle = 'rgba(201,162,74,0.22)'; ctx.fillRect(x + 20, yy - 18, w - 40, 38); text('>', x + 34, yy, 22, '#ffd27a', 'left'); }
+    text(it.label, x + 64, yy, 20, it.disabled ? '#7a6e60' : sel ? '#fff6d0' : '#d8c8a8', 'left');
+  }
+  const it = m.items[m.idx]; if (it && it.detail) text(it.detail, W / 2, y + h - 52, 18, '#9fc8d8');
+  text('W S choose    Enter or E select    Esc close', W / 2, y + h - 22, 16, '#8a7a60');
+}
+
+// ---- Scenes ------------------------------------------------------------------------------
+function figuresDraw() {
+  clear('#0c1c28'); glowQ = [];
+  const t = state.t, lab = (s, x, y) => text(s, x, y, 16, '#cfe');
+  const p = Object.assign(newPlayer(), { x: 120, y: 190, face: 1 }); drawDiver(p, t); lab('Diver', 120, 250);
+  const mk = (k, x, y, o) => Object.assign(mkMob(k, x, y, o), { st: 'idle', hidden: false, face: -1 });
+  drawAngler(mk('angler', 300, 190)); lab('Lantern angler', 300, 250);
+  drawAngler(mk('angler', 480, 190, { elite: true })); lab('Elite angler', 480, 250);
+  drawJelly(mk('jelly', 660, 180)); lab('Spore jelly', 660, 250);
+  drawCrab(mk('crab', 840, 205)); lab('Plated crab', 840, 250);
+  const eel = mk('eel', 1030, 200); eel.trail = []; for (let i = 0; i < 12; i++) eel.trail.push({ x: 1030 + i * 14, y: 200 + Math.sin(i) * 6 }); drawEel(eel); lab('Moray', 1030, 250);
+  const kb = mkBoss(1); kb.st = 'idle'; kb.x = 0; kb.y = FLOOR; kb.face = 1; ctx.save(); ctx.translate(200, 560 - FLOOR); ctx.scale(0.75, 0.75); ctx.translate(0, FLOOR * 0.25 + 0); drawKnight(Object.assign(kb, { x: 0 })); ctx.restore(); lab('The Drowned Knight', 200, 640);
+  const mb = mkBoss(2); mb.st = 'idle'; mb.x = 520; mb.y = 420; mb.face = 1; for (let i = 0; i < mb.segs.length; i++) { mb.segs[i].x = 520 - i * 30; mb.segs[i].y = 420 + Math.sin(i * 0.7 + t) * 16; } drawMaw(mb); lab('Maw of the Reef', 480, 520);
+  const lb = mkBoss(3); lb.st = 'idle'; lb.x = 0; lb.y = 0; lb.t = t; ctx.save(); ctx.translate(960, 460); ctx.scale(0.55, 0.55); drawLevi(lb); ctx.restore(); lab('The Crowned Leviathan', 960, 640);
+  drawPatron(1180, 200, -1, 1); lab('Patron', 1180, 250);
+  for (const [gx, gy, r, rgb, al] of glowQ) glow(gx, gy, r, rgb, al);
+}
+function drawTitle() {
+  const t = state.t; if (!state.bg) state.bg = genBG(1);
+  state.depth = 1; cam.x = 200 + t * 30; drawSea();
+  ctx.save(); ctx.translate(-Math.round(cam.x), 0); glowQ = [];
+  drawFloor(pal(1));
+  const a = Object.assign(mkMob('angler', cam.x + 900, 330), { face: -1 }); drawAngler(a);
+  fig(cam.x + 360, 420 + Math.sin(t * 1.5) * 10, 1, 1, () => {}); drawDiver({ x: cam.x + 360, y: 420 + Math.sin(t * 1.5) * 10, face: 1, act: null, at: 0, dur: 1, inv: 0, flash: 0, guard: false }, t);
+  ctx.restore();
+  const g = ctx.createRadialGradient(W / 2, H / 2, 200, W / 2, H / 2, 760); g.addColorStop(0, 'rgba(2,8,16,0)'); g.addColorStop(1, 'rgba(2,8,16,0.85)'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (const [gx, gy, r, rgb, al] of glowQ) glow(gx - Math.round(cam.x), gy, r, rgb, al);
+  glow(W / 2, 170, 360, '255,170,70', 0.25);
+  text('DROWNED HEARTH', W / 2, 150, 76, '#ffe3b0'); text('hunt the deep, feed the hearth', W / 2, 212, 24, '#9fd8e0');
+  CONTROLS.forEach((c, i) => text(c, W / 2, 330 + i * 34, 22, '#cfe'));
+  text('Enter: new game' + (loadSave() ? '     C: continue' : ''), W / 2, 560, 28, '#fff6d0');
+  text('Beat three bosses, then the descent never ends', W / 2, 610, 18, '#8fb8c8');
+}
+const scenes = {
+  figures: { update(dt) { state.t += dt; }, draw() { figuresDraw(); } },
+  title: {
+    update(dt) {
+      state.t += dt;
+      if (pressed('KeyC') && loadSave()) { reset(); state.S = Object.assign(newSave(), loadSave()); state.p = newPlayer(); enterTavern(true); scene = 'play'; toast('Welcome back.'); }
+      else if (pressed('Enter') || pressed('Space')) { reset(); scene = 'play'; toast('Walk right to the dive door. Use E to use it.', 6); }
+    },
+    draw() { drawTitle(); },
+  },
+  play: {
+    update(dt) {
+      if (!state.menu && (pressed('KeyP') || pressed('Escape'))) { scene = 'pause'; return; }
+      updWorld(dt);
+    },
+    draw() { if (state.mode === 'tavern') drawTavern(); else drawDive(); drawHUD(); drawMenu(); },
+  },
+  pause: {
+    update() { if (pressed('KeyP') || pressed('Escape')) scene = 'play'; },
+    draw() { scenes.play.draw(); ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, W, H); text('Paused', W / 2, H / 2 - 20, 56, '#fff'); text('P to go on   M to mute', W / 2, H / 2 + 40, 22, '#cfe'); },
+  },
+  over: {
+    update(dt) { state.deathT += dt; updFx(dt); if (state.deathT > 1.6 && (pressed('Enter') || pressed('KeyR') || pressed('Space'))) respawn(); },
+    draw() {
+      scenes.play.draw(); const k = clamp(state.deathT / 1.2, 0, 1);
+      ctx.fillStyle = `rgba(30,0,0,${0.7 * k})`; ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = k; text('YOU DIED', W / 2, H / 2 - 30, 96, '#d83a3a'); ctx.globalAlpha = 1;
+      if (state.deathT > 0.8) { text(`Your ${state.S.stain ? state.S.stain.souls : 0} souls and your catch wait where you fell. Reach them before you die again.`, W / 2, H / 2 + 40, 20, '#e8c8c0'); }
+      if (state.deathT > 1.6) text('Enter: wake at the hearth', W / 2, H / 2 + 90, 26, '#fff');
+    },
+  },
+  results: {
+    update(dt) { state.t += dt; if (pressed('Enter')) { const p = state.p; enterTavern(true); p.hp = maxHP(); scene = 'play'; toast('Endless descent unlocked at the dive door.', 6); save(); } },
+    draw() {
+      drawDive(); ctx.fillStyle = 'rgba(0,0,0,0.65)'; ctx.fillRect(0, 0, W, H);
+      text('THE DEEP IS QUIET', W / 2, 200, 64, '#ffe3b0'); text('The Crowned Leviathan is felled.', W / 2, 262, 24, '#cfe');
+      const S = state.S; [`Level ${S.lvl}   Blade ${S.wlvl}   Renown ${renown()}`, `Souls ${S.souls}   Gold ${S.gold}`, `Bosses felled ${S.beaten}`].forEach((s, i) => text(s, W / 2, 340 + i * 36, 24, '#fff6d0'));
+      text('Enter: back to the tavern. The endless descent is open.', W / 2, 520, 24, '#9ff0e0');
+    },
+  },
+};
+
+// ---- Loop: fixed step, frame time clamped ------------------------------------------------
+function step() {
+  if (pressed('KeyM')) { setMuted(!muted); hit.delete('KeyM'); }
+  scenes[scene].update(STEP); hit.clear();
+}
+let last, acc = 0, ALPHA = 1;
+function tick() {
+  const now = clock.now();
+  acc += Math.min(now - last, 0.25); last = now;
+  while (acc >= STEP) { step(); acc -= STEP; }
+  ALPHA = acc / STEP;
+  drawFrame();
+}
+function drawFrame() { scenes[scene].draw(); }
+function frame() { tick(); requestAnimationFrame(frame); }
+function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) tick(); }
+
+window.game = {
+  get scene() { return scene; },
+  get state() { return state; },
+  press(code) { hit.add(code); },
+  hold(code, on) { on ? down.add(code) : down.delete(code); },
+  get events() { return events; },
+  step(n = 1, draw = true, alpha = 1) {
+    for (let i = 0; i < n; i++) step();
+    if (draw) { ALPHA = alpha; drawFrame(); }
+  },
+};
+
+reset();
+scene = params.get('scene') || 'title';
+if (params.get('dive') && scene === 'title') scene = 'play';
+last = clock.now();
+if (params.get('manual') === '1') drawFrame();
+else { requestAnimationFrame(frame); setInterval(timer, 50); }
+</script>
+</body>
+</html>
