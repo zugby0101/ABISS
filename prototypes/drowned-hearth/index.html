@@ -15,6 +15,26 @@
 </style>
 </head>
 <body>
+<div id="diag" style="display:none;position:fixed;left:0;top:0;right:0;z-index:9;background:#300;color:#fff;font:16px/1.4 monospace;padding:16px;white-space:pre-wrap"></div>
+<script>
+// If anything stops the game from starting, say what it was on the page itself, in any browser.
+(function () {
+  var shown = 0;
+  function show(msg) {
+    var d = document.getElementById('diag'); if (!d) return;
+    d.style.display = 'block'; shown++;
+    d.textContent = (shown > 1 ? d.textContent + '\n' : 'Drowned Hearth could not run. Send this text to the developer:\n\n') + msg + '\n\nBrowser: ' + navigator.userAgent;
+  }
+  window.__diagShow = show;
+  window.addEventListener('error', function (e) {
+    var t = e.target;
+    if (t && t !== window && t.tagName) { show('A file did not load: ' + (t.src || t.href) + '\nKeep config.js in the same folder as index.html.'); return; }
+    show('Error: ' + e.message + (e.filename ? '\nin ' + e.filename.split('/').pop() + ':' + e.lineno + ':' + e.colno : ''));
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) { show('Error: ' + (e.reason && e.reason.message || e.reason)); });
+  setTimeout(function () { if (!window.__started) show('The game did not start after 3 seconds (no error was reported).'); }, 3000);
+})();
+</script>
 <noscript>Drowned Hearth needs JavaScript switched on.</noscript>
 <canvas id="game" tabindex="0"></canvas>
 <script src="config.js"></script>
@@ -22,6 +42,7 @@
 'use strict';
 // ---- Built to be checked ----------------------------------------------------------------
 const params = new URLSearchParams(location.search);
+if (!window.CONFIG) throw new Error('config.js did not load: keep it in the same folder as index.html');
 const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value }); // live: tune.speed is CONFIG.speed.value
 const STEP = 1 / 60;
 const W = 1280, H = 720;
@@ -1547,7 +1568,7 @@ function tick() {
 function drawFrame() { scenes[scene].draw(); drawTouch(); }
 function frame() { requestAnimationFrame(frame); safeTick(); }
 let errs = 0;
-function safeTick() { try { tick(); } catch (e) { if (errs++ < 5) console.error(e); last = clock.now(); acc = 0; } }
+function safeTick() { try { tick(); window.__started = true; } catch (e) { window.__started = true; if (errs++ < 3) { console.error(e); if (window.__diagShow) window.__diagShow('Frame error: ' + e.message + (e.stack ? '\n' + String(e.stack).split('\n').slice(0, 3).join('\n') : '')); } last = clock.now(); acc = 0; } }
 function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) safeTick(); }
 
 window.game = {
