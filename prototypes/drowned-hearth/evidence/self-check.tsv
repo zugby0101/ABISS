@@ -1,4 +1,4 @@
-time	2026-11-15 22:49:44
+time	2026-11-15 23:06:42
 keep	lines	0	pinned	0
 briefword	2d	unlisted
 briefword	3d	unlisted
@@ -28,16 +28,17 @@ scene	play	0	title
 scene	play	1	play
 digits	log	bold 20px "Courier New", ui-monospace, Menlo, monospace	tabular	0
 digits	log	bold 16px "Courier New", ui-monospace, Menlo, monospace	tabular	0
-measure	step-time	play	0.006	0.600	672
-lane	play	stop	11.2	353
+digits	log	bold 22px "Courier New", ui-monospace, Menlo, monospace	tabular	0
+measure	step-time	play	0.032	1.300	672
+lane	play	stop	11.2	373
 uncaught	play	0
-text	play	canvas	546,18,736,31	30.0	8.10	inside	THE DROWNED HEARTH
-text	play	canvas	1020,352,1057,363	28.5	10.79	inside	DIVE
 text	play	canvas	155,20,200,29	22.5	5.40	inside	HEALTH
-text	play	canvas	1068,13,1134,26	28.5	13.81	inside	Souls 0
-text	play	canvas	1077,34,1134,47	28.5	17.17	inside	Gold 0
-text	play	canvas	1059,55,1134,71	28.5	16.19	inside	Bag 0/10
-text	play	canvas	1005,77,1135,87	22.5	15.31	inside	Level 1   Blade 0
-text	play	canvas	148,561,486,574	22.5	5.60	inside	A D walk   E use what you stand at   P pause
+text	play	canvas	331,54,354,63	22.5	12.50	inside	AIR
+text	play	canvas	1068,13,1134,26	28.5	12.10	inside	Souls 0
+text	play	canvas	1077,34,1134,47	28.5	15.05	inside	Gold 0
+text	play	canvas	1059,55,1134,71	28.5	15.70	inside	Bag 1/10
+text	play	canvas	1005,77,1135,87	22.5	15.82	inside	Level 1   Blade 0
+text	play	canvas	1004,98,1135,108	22.5	9.80	inside	The Shallow Wreck
+text	play	canvas	148,561,671,574	22.5	7.38	inside	J light  K heavy  L roll  Shift guard  R flask  Space harpoo
 screen	play	drawn
 responds	changed	4
